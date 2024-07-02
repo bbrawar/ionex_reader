@@ -9,7 +9,6 @@ setup(
         'matplotlib',
         'xarray',
         'cartopy',
-        'mpl_toolkits'
     ],
     author='Bhuvi Brawar',
     author_email='bbrawar@gmail.com',
