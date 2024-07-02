@@ -81,7 +81,7 @@ def plot_rms_map(rmsmap):
     proj = ccrs.PlateCarree()
     f, ax = plt.subplots(1, 1, subplot_kw=dict(projection=proj))
     ax.coastlines()
-    h = ax.imshow(rmsmap, cmap='viridis', vmin=0, vmax=100, extent=(-180, 180, -87.5, 87.5), transform=proj)
+    h = ax.imshow(rmsmap, cmap='viridis', vmin=0, vmax=10, extent=(-180, 180, -87.5, 87.5), transform=proj)
 
     # Add gridlines and labels
     ax.gridlines(draw_labels=True, linewidth=1, color='gray', alpha=0.5, linestyle='--')
