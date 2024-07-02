@@ -18,7 +18,8 @@ def read_ionex(filename):
         tecmaps = [parse_map(t) for t in ionex.split('START OF TEC MAP')[1:]]
         rmsmaps = [parse_rms_map(t) for t in ionex.split('START OF RMS MAP')[1:]]
         epochs = [get_epoch(t) for t in ionex.split('START OF TEC MAP')[1:]]
-        return create_xarray(tecmaps, rmsmaps, epochs)
+        metadata = get_metadata(ionex)
+        return create_xarray(tecmaps, rmsmaps, epochs, metadata)
 
 def parse_map(tecmap, exponent=-1):
     tecmap = re.split('.*END OF TEC MAP', tecmap)[0]
@@ -33,7 +34,21 @@ def get_epoch(tecmap):
     tecmap = np.array(tecmap.split(), dtype=int)
     return datetime(*tecmap)
 
-def create_xarray(tecmaps, rmsmaps, epochs):
+def get_metadata(ionex):
+    metadata = {}
+    version_match = re.search(r'(\d+\.\d+)\s+IONOSPHERE MAPS\s+GNSS\s+IONEX VERSION / TYPE', ionex)
+    if version_match:
+        metadata["ionex_version"] = version_match.group(1)
+
+    pgm_match = re.search(r'(.+?)\s+(.+?)\s+(\d{2}-[A-Z]{3}-\d{2} \d{2}:\d{2})\s+PGM / RUN BY / DATE', ionex)
+    if pgm_match:
+        metadata["program"] = pgm_match.group(1).strip()
+        metadata["run_by"] = pgm_match.group(2).strip()
+        metadata["date"] = pgm_match.group(3).strip()
+
+    return metadata
+
+def create_xarray(tecmaps, rmsmaps, epochs, metadata):
     # Assuming TEC and RMS maps have a uniform grid structure
     n_lat, n_lon = tecmaps[0].shape
     latitudes = np.linspace(87.5, -87.5, n_lat)
@@ -53,6 +68,12 @@ def create_xarray(tecmaps, rmsmaps, epochs):
         }
     )
     return ds
+
+#def get_tec(tecmap, lat, lon):
+#    i = round((87.5 - lat) * (tecmap.shape[0] - 1) / (2 * 87.5))
+#    j = round((180 + lon) * (tecmap.shape[1] - 1) / 360)
+#    return tecmap[i, j]
+
 
 def plot_tec_map(tecmap):
     proj = ccrs.PlateCarree()
