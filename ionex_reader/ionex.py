@@ -89,9 +89,9 @@ def get_metadata(ionex):
 
     pgm_match = re.search(r'(.+?)\s+(.+?)\s+(\d{2}-[A-Z]{3}-\d{2} \d{2}:\d{2})\s+PGM / RUN BY / DATE', ionex)
     if pgm_match:
-        metadata["program"] = pgm_match.group(1).strip()
+        #metadata["program"] = pgm_match.group(1).strip()
         metadata["run_by"] = pgm_match.group(2).strip()
-        metadata["date"] = pgm_match.group(3).strip()
+        #metadata["date"] = pgm_match.group(3).strip()
 
     return metadata
 
