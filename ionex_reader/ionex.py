@@ -93,7 +93,7 @@ def plot_tec_map(tecmap):
         plt.title('VTEC map')
         
     divider = make_axes_locatable(ax)
-    ax_cb = divider.new_horizontal(size='5%', pad=0.1, axes_class=plt.Axes)
+    ax_cb = divider.new_horizontal(size='5%', pad=0.3, axes_class=plt.Axes)
     f.add_axes(ax_cb)
     cb = plt.colorbar(h, cax=ax_cb)
     plt.rc({'text.usetex': True})
@@ -116,7 +116,7 @@ def plot_rms_map(rmsmap):
         plt.title('rms map')
         
     divider = make_axes_locatable(ax)
-    ax_cb = divider.new_horizontal(size='5%', pad=0.1, axes_class=plt.Axes)
+    ax_cb = divider.new_horizontal(size='5%', pad=0.3, axes_class=plt.Axes)
     f.add_axes(ax_cb)
     cb = plt.colorbar(h, cax=ax_cb)
     plt.rc({'text.usetex': True})
