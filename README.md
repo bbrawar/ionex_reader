@@ -30,4 +30,4 @@ plt.show()
 2. `plot_tec_map(tecmap)`: Plots a TEC map using Matplotlib and Cartopy.
 
 ## Dependencies
-`numpy, matplotlib, xarray, cartopy, mpl_toolkits`
+`numpy, matplotlib, xarray, cartopy`
