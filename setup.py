@@ -15,7 +15,7 @@ setup(
     description='A module to read and plot IONEX TEC maps as xarray Datasets',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
-    url='https://github.com/yourusername/ionex_reader',  # Replace with your GitHub repo URL
+    url='https://github.com/bbrawar/ionex_reader',  # Replace with your GitHub repo URL
     classifiers=[
         'Programming Language :: Python :: 3',
         'License :: OSI Approved :: MIT License',
