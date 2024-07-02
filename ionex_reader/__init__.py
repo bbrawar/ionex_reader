@@ -1,10 +1,7 @@
-from .ionex import get_tecmaps, parse_map, get_epoch, create_xarray, get_tec, plot_tec_map
+from .ionex import read_ionex, plot_tec_map, plot_rms_map
 
 __all__ = [
-    'get_tecmaps',
-    'parse_map',
-    'get_epoch',
-    'create_xarray',
-    'get_tec',
-    'plot_tec_map'
+    'read_ionex',
+    'plot_tec_map',
+    'plot_rms_map'
 ]
