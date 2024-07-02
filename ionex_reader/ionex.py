@@ -67,6 +67,7 @@ def create_xarray(tecmaps, rmsmaps, epochs, metadata):
             "longitude": longitudes
         }
     )
+    ds.attrs.update(metadata)
     return ds
 
 #def get_tec(tecmap, lat, lon):
@@ -110,7 +111,7 @@ def plot_rms_map(rmsmap):
     ax.set_ylabel('Latitude')
 
     try:
-        plt.title(f'rms map ({tecmap.time.values})')
+        plt.title(f'rms map ({rmsmap.time.values})')
     except:
         plt.title('rms map')
         
