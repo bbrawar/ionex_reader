@@ -6,8 +6,9 @@ A Python module to read and plot IONEX TEC maps as xarray Datasets.
 
 Clone the repository and install the package using `pip`:
 
-```bash
-git clone https://github.com/yourusername/ionex_reader.git
+### bash
+```
+git clone https://github.com/bbrawar/ionex_reader.git
 cd ionex_reader
 pip install .
 ```
