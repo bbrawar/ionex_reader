@@ -17,7 +17,7 @@ pip install .
 from ionex_reader.ionex import get_tecmaps, plot_tec_map
 
 # Read TEC maps from an IONEX file
-ds = get_tecmaps('path_to_your_file.ionex')
+ds = read_ionex('path_to_your_file.ionex')
 print(ds)  # Print the xarray Dataset
 
 # Plot the first TEC map
@@ -28,6 +28,7 @@ plt.show()
 ## Functions
 1. `get_tecmaps(filename)`: Reads an IONEX file and returns an xarray Dataset with TEC maps.
 2. `plot_tec_map(tecmap)`: Plots a TEC map using Matplotlib and Cartopy.
+3. `plot_rms_map(rmsmap)`: Plots a TEC map using Matplotlib and Cartopy.
 
 ## Dependencies
 `numpy, matplotlib, xarray, cartopy`
