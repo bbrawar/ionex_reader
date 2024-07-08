@@ -191,6 +191,22 @@ def plot_rms_map(rmsmap):
     plt.rc({'text.usetex': True})
     cb.set_label('TECU ($10^{16} \\mathrm{el}/\\mathrm{m}^2$)')
 
+
+def plot_time_series(ds, lat, lon, variable='tec'):
+    lat_idx = np.abs(ds.latitude - lat).argmin()
+    lon_idx = np.abs(ds.longitude - lon).argmin()
+    
+    time_series = ds[variable].isel(latitude=lat_idx, longitude=lon_idx)
+    
+    plt.figure(figsize=(10, 5))
+    plt.plot(ds.time, time_series, label=f'{variable} at ({lat}, {lon})')
+    plt.xlabel('Time')
+    plt.ylabel(f'{variable.upper()} ($10^{16} \\mathrm{el}/\\mathrm{m}^2$)')
+    plt.title(f'Time Series of {variable.upper()} at ({lat}, {lon})')
+    plt.legend()
+    plt.grid()
+    plt.show()
+
 # Example usage:
 # ds = read_ionex('path_to_your_file.ionex')
 # tecmap = ds['tec'].isel(time=0).values  # Plot the first time slice of the TEC map
