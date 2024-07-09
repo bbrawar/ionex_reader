@@ -193,6 +193,16 @@ def plot_rms_map(rmsmap):
 
 
 def plot_time_series(ds, lat, lon, variable='tec'):
+    """
+    Plot time series value of TEC of any location given Lat-Long
+
+    Parameters:
+    ds: Xarray dataset (file output after read_ionex())
+    lat(float): latitude from the list of latitudes
+    lon(float): longitude from the list of longitudes
+    varibale (string): 'tec' if want to plot TEC values
+                       'rms' if want to call rms TEC values
+    """
     lat_idx = np.abs(ds.latitude - lat).argmin()
     lon_idx = np.abs(ds.longitude - lon).argmin()
     
