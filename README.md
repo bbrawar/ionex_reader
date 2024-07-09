@@ -36,3 +36,10 @@ plt.show()
 4. `plot_time_series(ds,lat,lon,variable='tec')`: Plots a time series plot of tec values at any lat-long.
 ## Dependencies
 `numpy, matplotlib, xarray, cartopy`
+
+
+## Author
+[Bhuvnesh Brawar](bbrawar.github.io)</br>
+[bbrawar@gmail.com](mailto:bbrawar@gmail.com)</br>
+[phd2101121005@iiti.ac.in](mailto:phd2101121005@iiti.ac.in)
+
