@@ -209,13 +209,13 @@ def plot_time_series(ds, lat, lon, variable='tec'):
     time_series = ds[variable].isel(latitude=lat_idx, longitude=lon_idx)
     
     plt.figure(figsize=(10, 5))
-    plt.plot(ds.time, time_series, label=f'{variable} at ({lat}, {lon})')
-    plt.xlabel('Time')
-    plt.ylabel(f'{variable.upper()} ($10^{16} \\mathrm{el}/\\mathrm{m}^2$)')
+    plt.plot(ds.time, time_series, label=f'{variable.upper()} at ({lat}, {lon})')
+    plt.xlabel('Time (UTC)')
+    plt.ylabel(r'TECU ($10^{16} \\mathrm{el}/\\mathrm{m}^2$)')
     plt.title(f'Time Series of {variable.upper()} at ({lat}, {lon})')
     plt.legend()
     plt.grid()
-    plt.show()
+    #plt.show()
 
 # Example usage:
 # ds = read_ionex('path_to_your_file.ionex')
