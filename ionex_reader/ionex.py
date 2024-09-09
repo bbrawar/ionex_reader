@@ -5,6 +5,7 @@ from datetime import datetime
 import xarray as xr
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import cartopy.crs as ccrs
+import geomag
 
 '''
 This script reads IONEX files as XARRAY Datasets.
@@ -129,7 +130,37 @@ def create_xarray(tecmaps, rmsmaps, epochs, metadata):
     ds.attrs.update(metadata)
     return ds
 
-def plot_tec_map(tecmap):
+# Function to add geomagnetic latitude lines
+def plot_geomagnetic_latitude_lines(ax):
+    latitudes = np.arange(-90, 91, 10)
+    for lat in latitudes:
+        geomag_lat_line = np.array([geomag.GeoMag().geo2mag(lat, lon)[0] for lon in np.arange(-180, 180, 2)])
+        ax.plot(np.arange(-180, 180, 2), geomag_lat_line, 'r--', transform=ccrs.PlateCarree())
+        
+'''
+# Function to plot TEC map with optional geomagnetic latitude lines
+def plot_tec_map(tecmap, add_geomagnetic_lines=False):
+    proj = ccrs.PlateCarree()
+    fig, ax = plt.subplots(1, 1, subplot_kw=dict(projection=proj))
+    
+    # Plot the TEC map
+    ax.coastlines()
+    h = ax.imshow(tecmap, cmap='viridis', vmin=0, vmax=100, extent=(-180, 180, -87.5, 87.5), transform=proj)
+    
+    # Add geomagnetic latitude lines if requested
+    if add_geomagnetic_lines:
+        plot_geomagnetic_latitude_lines(ax)
+    
+    # Add colorbar
+    divider = make_axes_locatable(ax)
+    ax_cb = divider.new_horizontal(size='5%', pad=0.1, axes_class=plt.Axes)
+    fig.add_axes(ax_cb)
+    cb = plt.colorbar(h, cax=ax_cb)
+    cb.set_label('TECU ($10^{16} \\mathrm{el}/\\mathrm{m}^2$)')
+
+    plt.show()
+'''
+def plot_tec_map(tecmap, add_geomagnetic_lines=False):
     """
     Plot a TEC map using Matplotlib and Cartopy.
 
@@ -140,6 +171,10 @@ def plot_tec_map(tecmap):
     f, ax = plt.subplots(1, 1, subplot_kw=dict(projection=proj))
     ax.coastlines()
     h = ax.imshow(tecmap, cmap='viridis', vmin=0, vmax=100, extent=(-180, 180, -87.5, 87.5), transform=proj)
+    
+    # Add geomagnetic latitude lines if requested
+    if add_geomagnetic_lines:
+        plot_geomagnetic_latitude_lines(ax)
 
     # Add gridlines and labels (only bottom x-axis and left y-axis)
     gl = ax.gridlines(draw_labels=True, linewidth=1, color='gray', alpha=0.5, linestyle='--')
