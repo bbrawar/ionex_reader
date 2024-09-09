@@ -11,7 +11,7 @@ setup(
         'cartopy',
         'gromag',
     ],
-    author='Bhuvi Brawar',
+    author='Bhuvnesh Brawar',
     author_email='bbrawar@gmail.com',
     description='A module to read and plot IONEX TEC maps as xarray Datasets',
     long_description=open('README.md').read(),
