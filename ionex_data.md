@@ -26,7 +26,7 @@ From: [Integrity investigation of global ionospheric TEC maps for high-precision
 
 
 
-The MSLM and SLM in Table 1 is the mapping function currently used in the corresponding IAAC’s GIM generation to convert STEC to VTEC. SLM is the standard single-layer model while MSLM is the modified standard single-layer model (Schaer S, 1999). In addition to the GIMs listed in Table 1, IGSG and IGRG are the final and rapid GIMs which resulting from the rank-weighted mean of the IAAC GIMs from CODE, ESA and JPL (Hernández-Pajares et al. 2009). All these GIMs can be downloaded from ftp://ftp.gipp.org.cn/product/ionex/ in IONEX format. Among these GIMs, CARG and CASG only provides the flag of availability (1 and 999 for available and unavailable, respectively) in the RMS map of the IONEX file. The NRCan only provides rapid products from 2015. 
+The MSLM and SLM in Table 1 is the mapping function currently used in the corresponding IAAC’s GIM generation to convert STEC to VTEC. SLM is the standard single-layer model while MSLM is the modified standard single-layer model (Schaer S, 1999). In addition to the GIMs listed in Table 1, IGSG and IGRG are the final and rapid GIMs which resulting from the rank-weighted mean of the IAAC GIMs from CODE, ESA and JPL (Hernández-Pajares et al. 2009). All these GIMs can be downloaded from [ftp://ftp.gipp.org.cn/product/ionex/](ftp://ftp.gipp.org.cn/product/ionex/) in IONEX format. Among these GIMs, CARG and CASG only provides the flag of availability (1 and 999 for available and unavailable, respectively) in the RMS map of the IONEX file. The NRCan only provides rapid products from 2015. 
 
 Source: (https://link.springer.com/article/10.1007/s00190-021-01487-8)
 
