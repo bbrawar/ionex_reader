@@ -5,6 +5,7 @@ Different metrial and refernces for IONEX files:
 2. https://notebook.community/daniestevez/jupyter_notebooks/IONEX
 3. https://destevez.net/2018/02/studying-ionex-files/
 4. https://server.gage.upc.edu/gLAB/HTML/IONEX_v1.0.html
+5. https://cddis.nasa.gov/archive/gnss/products/ionex/
 
 ###Info: 
 Global ionospheric mapping is an active field where several techniques coexist for the determination of global ionospheric TECs using the dual-frequency GNSS measurements from a worldwide network of receivers. Currently, there are seven IAACs which developed different techniques to generate respective rapid and final GIM products. Table 1 summarizes the GIM products of different IAACs as well as the corresponding computation methods.
