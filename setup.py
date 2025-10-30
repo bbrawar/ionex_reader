@@ -9,7 +9,7 @@ setup(
         'matplotlib',
         'xarray',
         'cartopy',
-        'gromag',
+        'geomag',
     ],
     author='Bhuvnesh Brawar',
     author_email='bbrawar@gmail.com',
