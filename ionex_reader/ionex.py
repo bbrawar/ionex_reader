@@ -7,210 +7,275 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import cartopy.crs as ccrs
 import geomag
 
-"""
-IONEX Reader & Visualization Toolkit
-Author: B. Brawar
-Improved Version: Robust IONEX parsing + plotting + time series
-"""
-
-# ============================================================
-# -------------------- CORE READER ---------------------------
-# ============================================================
+'''
+This script reads IONEX files as XARRAY Datasets.
+email: bbrawar@gmail.com
+Limitation: This script doesn't take values Lat-Long from the file.
+'''
 
 def read_ionex(filename):
     """
-    Read an IONEX file and return an xarray Dataset.
+    Read an IONEX file and extract TEC maps, RMS maps, epochs, and metadata.
+
+    Parameters:
+    filename (str): Path to the IONEX file.
+
+    Returns:
+    xr.Dataset: A dataset containing TEC and RMS maps with associated metadata.
     """
-    with open(filename, "r", errors="ignore") as f:
-        content = f.read()
+    with open(filename) as f:
+        ionex = f.read()
+        tecmaps = [parse_map(t) for t in ionex.split('START OF TEC MAP')[1:]]
+        rmsmaps = [parse_rms_map(t) for t in ionex.split('START OF RMS MAP')[1:]]
+        epochs = [get_epoch(t) for t in ionex.split('START OF TEC MAP')[1:]]
+        metadata = get_metadata(ionex)
+        return create_xarray(tecmaps, rmsmaps, epochs, metadata)
 
-    tec_blocks = content.split("START OF TEC MAP")[1:]
-    rms_blocks = content.split("START OF RMS MAP")[1:]
+def parse_map(tecmap, exponent=-1):
+    """
+    Parse a TEC map from a string and return it as a numpy array.
 
-    tecmaps = [parse_map(block) for block in tec_blocks]
-    rmsmaps = [parse_rms_map(block) for block in rms_blocks]
-    epochs  = [get_epoch(block) for block in tec_blocks]
+    Parameters:
+    tecmap (str): String containing the TEC map.
+    exponent (int): Exponent for scaling the TEC values.
 
-    lat, lon = extract_grid(content)
-    metadata = get_metadata(content)
+    Returns:
+    np.ndarray: Parsed TEC map.
+    """
+    tecmap = re.split('.*END OF TEC MAP', tecmap)[0]
+    return np.stack([np.fromstring(l, sep=' ') for l in re.split('.*LAT/LON1/LON2/DLON/H\\n', tecmap)[1:]]) * 10**exponent
 
-    return create_xarray(tecmaps, rmsmaps, epochs, lat, lon, metadata)
+def parse_rms_map(rmsmap, exponent=-1):
+    """
+    Parse an RMS map from a string and return it as a numpy array.
 
+    Parameters:
+    rmsmap (str): String containing the RMS map.
+    exponent (int): Exponent for scaling the RMS values.
 
-# ============================================================
-# -------------------- MAP PARSERS ---------------------------
-# ============================================================
+    Returns:
+    np.ndarray: Parsed RMS map.
+    """
+    rmsmap = re.split('.*END OF RMS MAP', rmsmap)[0]
+    return np.stack([np.fromstring(l, sep=' ') for l in re.split('.*LAT/LON1/LON2/DLON/H\\n', rmsmap)[1:]]) * 10**exponent
 
-def parse_map(block, exponent=-1):
-    block = block.split("END OF TEC MAP")[0]
-    data_lines = re.split(".*LAT/LON1/LON2/DLON/H\n", block)[1:]
-    return np.stack([np.fromstring(l, sep=" ") for l in data_lines]) * 10 ** exponent
+# def get_epoch(tecmap):
+#     """
+#     Extract the epoch from a TEC map string.
 
+#     Parameters:
+#     tecmap (str): String containing the TEC map.
 
-def parse_rms_map(block, exponent=-1):
-    block = block.split("END OF RMS MAP")[0]
-    data_lines = re.split(".*LAT/LON1/LON2/DLON/H\n", block)[1:]
-    return np.stack([np.fromstring(l, sep=" ") for l in data_lines]) * 10 ** exponent
-
-
-# ============================================================
-# -------------------- EPOCH HANDLER -------------------------
-# ============================================================
-
+#     Returns:
+#     datetime: Datetime object representing the epoch.
+#     """
+#     tecmap = re.split('EPOCH OF CURRENT MAP', tecmap)[0]
+#     tecmap = np.array(tecmap.split(), dtype=int)
+#     return datetime(*tecmap)
 def get_epoch(tecmap):
     """
-    Extract epoch and handle 24:00:00 rollover.
-    """
-    epoch_line = tecmap.split("EPOCH OF CURRENT MAP")[0]
-    epoch_vals = np.array(epoch_line.split(), dtype=int)
-    year, month, day, hour, minute, second = epoch_vals
+    Extract the epoch from a TEC map string.
 
+    Parameters:
+    tecmap (str): String containing the TEC map.
+
+    Returns:
+    datetime: Datetime object representing the epoch.
+    """
+    tecmap = re.split('EPOCH OF CURRENT MAP', tecmap)[0]
+    tecmap = np.array(tecmap.split(), dtype=int)
+
+    year, month, day, hour, minute, second = tecmap
+
+    # ✅ Handle IONEX special case: 24:00:00 → next day 00:00:00
     if hour == 24:
         return datetime(year, month, day, 0, minute, second) + timedelta(days=1)
-    return datetime(year, month, day, hour, minute, second)
-
-
-# ============================================================
-# -------------------- GRID EXTRACTION -----------------------
-# ============================================================
-
-def extract_grid(content):
+    else:
+        return datetime(year, month, day, hour, minute, second)
+        
+def get_metadata(ionex):
     """
-    Extract latitude and longitude grids from IONEX header.
+    Extract metadata from the IONEX file.
+
+    Parameters:
+    ionex (str): String containing the entire IONEX file.
+
+    Returns:
+    dict: Dictionary containing the extracted metadata.
     """
-    lat_info = re.search(r"(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+LAT1 / LAT2 / DLAT", content)
-    lon_info = re.search(r"(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+LON1 / LON2 / DLON", content)
-
-    lat1, lat2, dlat = map(float, lat_info.groups())
-    lon1, lon2, dlon = map(float, lon_info.groups())
-
-    latitudes  = np.arange(lat1, lat2 + dlat, dlat)
-    longitudes = np.arange(lon1, lon2 + dlon, dlon)
-
-    return latitudes, longitudes
-
-
-# ============================================================
-# -------------------- METADATA ------------------------------
-# ============================================================
-
-def get_metadata(content):
     metadata = {}
+    version_match = re.search(r'(\d+\.\d+)\s+IONOSPHERE MAPS\s+GNSS\s+IONEX VERSION / TYPE', ionex)
+    if version_match:
+        metadata["ionex_version"] = version_match.group(1)
 
-    v = re.search(r"(\d+\.\d+)\s+IONOSPHERE MAPS\s+GNSS\s+IONEX VERSION / TYPE", content)
-    if v:
-        metadata["ionex_version"] = v.group(1)
-
-    pgm = re.search(r"(.+?)\s+(.+?)\s+(\d{2}-[A-Z]{3}-\d{2}.*)PGM / RUN BY / DATE", content)
-    if pgm:
-        metadata["run_by"] = pgm.group(2).strip()
-        metadata["creation_date"] = pgm.group(3).strip()
+    pgm_match = re.search(r'(.+?)\s+(.+?)\s+(\d{2}-[A-Z]{3}-\d{2} \d{2}:\d{2})\s+PGM / RUN BY / DATE', ionex)
+    if pgm_match:
+        #metadata["program"] = pgm_match.group(1).strip()
+        metadata["run_by"] = pgm_match.group(2).strip()
+        #metadata["date"] = pgm_match.group(3).strip()
 
     return metadata
 
+def create_xarray(tecmaps, rmsmaps, epochs, metadata):
+    """
+    Create an xarray Dataset from TEC and RMS maps, epochs, and metadata.
 
-# ============================================================
-# -------------------- XARRAY CREATION -----------------------
-# ============================================================
+    Parameters:
+    tecmaps (list of np.ndarray): List of TEC maps.
+    rmsmaps (list of np.ndarray): List of RMS maps.
+    epochs (list of datetime): List of epochs.
+    metadata (dict): Dictionary containing metadata.
 
-def create_xarray(tecmaps, rmsmaps, epochs, lat, lon, metadata):
+    Returns:
+    xr.Dataset: Dataset containing the TEC and RMS maps with associated metadata.
+    """
+    # Assuming TEC and RMS maps have a uniform grid structure
+    n_lat, n_lon = tecmaps[0].shape
+    latitudes = np.linspace(87.5, -87.5, n_lat)
+    longitudes = np.linspace(-180, 180, n_lon)
+    
+    tec_data = np.stack(tecmaps)
+    rms_data = np.stack(rmsmaps)
     ds = xr.Dataset(
         {
-            "tec": (["time", "latitude", "longitude"], np.stack(tecmaps)),
-            "rms": (["time", "latitude", "longitude"], np.stack(rmsmaps))
+            "tec": (["time", "latitude", "longitude"], tec_data),
+            "rms": (["time", "latitude", "longitude"], rms_data)
         },
         coords={
             "time": epochs,
-            "latitude": lat,
-            "longitude": lon
-        },
-        attrs=metadata
+            "latitude": latitudes,
+            "longitude": longitudes
+        }
     )
+    ds.attrs.update(metadata)
     return ds
 
-
-# ============================================================
-# -------------------- GEOMAG LINES --------------------------
-# ============================================================
-
+# Function to add geomagnetic latitude lines
 def plot_geomagnetic_latitude_lines(ax):
-    gm = geomag.GeoMag()
-    lons = np.arange(-180, 181, 2)
-
-    for lat in np.arange(-60, 61, 10):
-        mag_lat = [gm.geo2mag(lat, lon)[0] for lon in lons]
-        ax.plot(lons, mag_lat, "r--", linewidth=0.8, transform=ccrs.PlateCarree())
-
-
-# ============================================================
-# -------------------- MAP PLOTTING --------------------------
-# ============================================================
-
-def plot_tec_map(tecmap, time=None, add_geomagnetic_lines=False):
+    latitudes = np.arange(-90, 91, 10)
+    for lat in latitudes:
+        geomag_lat_line = np.array([geomag.GeoMag().geo2mag(lat, lon)[0] for lon in np.arange(-180, 180, 2)])
+        ax.plot(np.arange(-180, 180, 2), geomag_lat_line, 'r--', transform=ccrs.PlateCarree())
+        
+'''
+# Function to plot TEC map with optional geomagnetic latitude lines
+def plot_tec_map(tecmap, add_geomagnetic_lines=False):
     proj = ccrs.PlateCarree()
-    fig, ax = plt.subplots(figsize=(10, 5), subplot_kw={"projection": proj})
-
+    fig, ax = plt.subplots(1, 1, subplot_kw=dict(projection=proj))
+    
+    # Plot the TEC map
     ax.coastlines()
-    h = ax.imshow(
-        tecmap, cmap="viridis", vmin=0, vmax=100,
-        extent=[-180, 180, -90, 90], transform=proj
-    )
+    h = ax.imshow(tecmap, cmap='viridis', vmin=0, vmax=100, extent=(-180, 180, -87.5, 87.5), transform=proj)
+    
+    # Add geomagnetic latitude lines if requested
+    if add_geomagnetic_lines:
+        plot_geomagnetic_latitude_lines(ax)
+    
+    # Add colorbar
+    divider = make_axes_locatable(ax)
+    ax_cb = divider.new_horizontal(size='5%', pad=0.1, axes_class=plt.Axes)
+    fig.add_axes(ax_cb)
+    cb = plt.colorbar(h, cax=ax_cb)
+    cb.set_label('TECU ($10^{16} \\mathrm{el}/\\mathrm{m}^2$)')
 
+    plt.show()
+'''
+def plot_tec_map(tecmap, add_geomagnetic_lines=False):
+    """
+    Plot a TEC map using Matplotlib and Cartopy.
+
+    Parameters:
+    tecmap (np.ndarray): TEC map to be plotted.
+    """
+    proj = ccrs.PlateCarree()
+    f, ax = plt.subplots(1, 1, subplot_kw=dict(projection=proj))
+    ax.coastlines()
+    h = ax.imshow(tecmap, cmap='viridis', vmin=0, vmax=100, extent=(-180, 180, -87.5, 87.5), transform=proj)
+    
+    # Add geomagnetic latitude lines if requested
     if add_geomagnetic_lines:
         plot_geomagnetic_latitude_lines(ax)
 
-    gl = ax.gridlines(draw_labels=True, linestyle="--", alpha=0.4)
+    # Add gridlines and labels (only bottom x-axis and left y-axis)
+    gl = ax.gridlines(draw_labels=True, linewidth=1, color='gray', alpha=0.5, linestyle='--')
     gl.top_labels = False
     gl.right_labels = False
+    ax.set_xlabel('Longitude')
+    ax.set_ylabel('Latitude')
 
-    title = f"VTEC Map {time}" if time else "VTEC Map"
-    ax.set_title(title)
-
+    try:
+        plt.title(f'VTEC map ({tecmap.time.values})')
+    except:
+        plt.title('VTEC map')
+        
     divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="4%", pad=0.1)
-    cb = plt.colorbar(h, cax=cax)
-    cb.set_label("TECU")
+    ax_cb = divider.new_horizontal(size='5%', pad=0.1, axes_class=plt.Axes)
+    f.add_axes(ax_cb)
+    cb = plt.colorbar(h, cax=ax_cb)
+    plt.rc({'text.usetex': True})
+    cb.set_label('TECU ($10^{16} \\mathrm{el}/\\mathrm{m}^2$)')
 
-    plt.show()
+def plot_rms_map(rmsmap):
+    """
+    Plot an RMS map using Matplotlib and Cartopy.
 
-
-def plot_rms_map(rmsmap, time=None):
+    Parameters:
+    rmsmap (np.ndarray): RMS map to be plotted.
+    """
     proj = ccrs.PlateCarree()
-    fig, ax = plt.subplots(figsize=(10, 5), subplot_kw={"projection": proj})
-
+    f, ax = plt.subplots(1, 1, subplot_kw=dict(projection=proj))
     ax.coastlines()
-    h = ax.imshow(
-        rmsmap, cmap="plasma", vmin=0, vmax=10,
-        extent=[-180, 180, -90, 90], transform=proj
-    )
+    h = ax.imshow(rmsmap, cmap='viridis', vmin=0, vmax=10, extent=(-180, 180, -87.5, 87.5), transform=proj)
 
-    gl = ax.gridlines(draw_labels=True, linestyle="--", alpha=0.4)
+    # Add gridlines and labels (only bottom x-axis and left y-axis)
+    gl = ax.gridlines(draw_labels=True, linewidth=1, color='gray', alpha=0.5, linestyle='--')
     gl.top_labels = False
     gl.right_labels = False
+    ax.set_xlabel('Longitude')
+    ax.set_ylabel('Latitude')
 
-    title = f"RMS Map {time}" if time else "RMS Map"
-    ax.set_title(title)
-
+    try:
+        plt.title(f'RMS map ({rmsmap.time.values})')
+    except:
+        plt.title('RMS map')
+        
     divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="4%", pad=0.1)
-    cb = plt.colorbar(h, cax=cax)
-    cb.set_label("TECU")
+    ax_cb = divider.new_horizontal(size='5%', pad=0.1, axes_class=plt.Axes)
+    f.add_axes(ax_cb)
+    cb = plt.colorbar(h, cax=ax_cb)
+    plt.rc({'text.usetex': True})
+    cb.set_label('TECU ($10^{16} \\mathrm{el}/\\mathrm{m}^2$)')
 
-    plt.show()
 
+def plot_time_series(ds, lat, lon, variable='tec'):
+    """
+    Plot time series value of TEC of any location given Lat-Long
 
-# ============================================================
-# -------------------- TIME SERIES ---------------------------
-# ============================================================
-
-def plot_time_series(ds, lat, lon, variable="tec"):
-    da = ds[variable].sel(latitude=lat, longitude=lon, method="nearest")
-
+    Parameters:
+    ds: Xarray dataset (file output after read_ionex())
+    lat(float): latitude from the list of latitudes
+    lon(float): longitude from the list of longitudes
+    varibale (string): 'tec' if want to plot TEC values
+                       'rms' if want to call rms TEC values
+    """
+    lat_idx = np.abs(ds.latitude - lat).argmin()
+    lon_idx = np.abs(ds.longitude - lon).argmin()
+    
+    time_series = ds[variable].isel(latitude=lat_idx, longitude=lon_idx)
+    
     plt.figure(figsize=(10, 5))
-    plt.plot(ds.time, da)
-    plt.xlabel("Time (UTC)")
-    plt.ylabel("TECU")
-    plt.title(f"{variable.upper()} at ({lat:.1f}°, {lon:.1f}°)")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
+    plt.plot(ds.time, time_series, label=f'{variable.upper()} at ({lat}, {lon})')
+    plt.xlabel('Time (UTC)')
+    plt.ylabel(r'TECU ($10^{16} \\mathrm{el}/\\mathrm{m}^2$)')
+    plt.title(f'Time Series of {variable.upper()} at ({lat}, {lon})')
+    plt.legend()
+    plt.grid()
+    #plt.show()
+
+# Example usage:
+# ds = read_ionex('path_to_your_file.ionex')
+# tecmap = ds['tec'].isel(time=0).values  # Plot the first time slice of the TEC map
+# plot_tec_map(tecmap)
+# rmsmap = ds['rms'].isel(time=0).values  # Plot the first time slice of the RMS map
+# plot_rms_map(rmsmap)
+# plt.show()
