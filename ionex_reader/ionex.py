@@ -59,6 +59,19 @@ def parse_rms_map(rmsmap, exponent=-1):
     rmsmap = re.split('.*END OF RMS MAP', rmsmap)[0]
     return np.stack([np.fromstring(l, sep=' ') for l in re.split('.*LAT/LON1/LON2/DLON/H\\n', rmsmap)[1:]]) * 10**exponent
 
+# def get_epoch(tecmap):
+#     """
+#     Extract the epoch from a TEC map string.
+
+#     Parameters:
+#     tecmap (str): String containing the TEC map.
+
+#     Returns:
+#     datetime: Datetime object representing the epoch.
+#     """
+#     tecmap = re.split('EPOCH OF CURRENT MAP', tecmap)[0]
+#     tecmap = np.array(tecmap.split(), dtype=int)
+#     return datetime(*tecmap)
 def get_epoch(tecmap):
     """
     Extract the epoch from a TEC map string.
@@ -71,8 +84,15 @@ def get_epoch(tecmap):
     """
     tecmap = re.split('EPOCH OF CURRENT MAP', tecmap)[0]
     tecmap = np.array(tecmap.split(), dtype=int)
-    return datetime(*tecmap)
 
+    year, month, day, hour, minute, second = tecmap
+
+    # ✅ Handle IONEX special case: 24:00:00 → next day 00:00:00
+    if hour == 24:
+        return datetime(year, month, day, 0, minute, second) + timedelta(days=1)
+    else:
+        return datetime(year, month, day, hour, minute, second)
+        
 def get_metadata(ionex):
     """
     Extract metadata from the IONEX file.
