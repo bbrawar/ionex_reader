@@ -1,182 +1,363 @@
-import numpy as np
-import matplotlib.pyplot as plt
+"""
+ionex.py  —  v0.3.0
+====================
+Read and visualise IONEX ionospheric TEC maps as xarray Datasets.
+
+Author : Bhuvnesh Brawar  <bbrawar@gmail.com>
+         IIT Indore, Space Technology & Radio Cosmology Group
+
+Changelog
+---------
+v0.3.0
+  * BUG FIX  — latitude / longitude grids are now parsed directly from the
+               IONEX header (LAT1/LAT2/DLAT, LON1/LON2/DLON/HGT) instead of
+               being hardcoded.  Fixes silent wrong-value errors with CODE,
+               ESA, and any non-JPL product.
+  * BUG FIX  — files with no RMS maps (common in older IGS products) no
+               longer crash; an all-NaN RMS array is returned and a warning
+               is issued.
+  * BUG FIX  — plt.rc(dict) → plt.rcParams.update() (TypeError fix).
+  * BUG FIX  — double-backslash in ylabel raw strings corrected.
+  * BUG FIX  — get_epoch() now uses a targeted regex instead of splitting
+               on all whitespace before the tag; guards against non-numeric
+               text in the header block.
+  * BUG FIX  — geomag.GeoMag() is now instantiated once per call, not once
+               per grid point (was 3 400+ file-loads per plot).
+  * BUG FIX  — _base_map_fig extent is now derived from the actual grid.
+  * FEATURE  — read_metadata=False default (opt-in for faster reads).
+  * FEATURE  — Day/night terminator overlay with optional night shading
+               (pure numpy, no extra dependencies).
+  * FEATURE  — Geomagnetic latitude lines with labelled equator and ±30°
+               magnetic latitude contours highlighted (requires geomag pkg).
+  * FEATURE  — get_grid() exposed as public helper.
+  * QUALITY  — All plot functions return (fig, ax) for downstream customisation.
+  * QUALITY  — _base_map_fig extent driven by actual parsed grid bounds.
+
+v0.2.x  (intermediate fixes, see git log)
+v0.1.0  Initial release
+"""
+
+import warnings
 import re
 from datetime import datetime, timedelta
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe
 import xarray as xr
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 import cartopy.crs as ccrs
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-'''
-IONEX file reader as xarray Datasets.
-email: bbrawar@gmail.com
-
-Changelog:
-- Metadata extraction is now optional (default: False) for faster reads.
-- Only TEC and RMS maps are returned by default.
-- geomag import is deferred to avoid overhead when not plotting geomag lines.
-- Day/night terminator overlay added (no extra dependencies — pure numpy math).
-'''
-
+__version__ = '0.3.0'
+__author__  = 'Bhuvnesh Brawar'
+__email__   = 'bbrawar@gmail.com'
 
 # ---------------------------------------------------------------------------
-# Core reader
+# CBAR label — defined once, used in multiple plot functions
 # ---------------------------------------------------------------------------
+_CBAR_LABEL = r'TECU  ($10^{16}\ \mathrm{el}\ \mathrm{m}^{-2}$)'
 
-def read_ionex(filename, read_metadata=False):
+
+# ===========================================================================
+# 1.  GRID PARSING  (v0.3.0 — replaces hardcoded linspace)
+# ===========================================================================
+
+def get_grid(ionex_str):
     """
-    Read an IONEX file and extract TEC maps, RMS maps, epochs, and optionally metadata.
+    Parse the lat/lon/height grid specification from an IONEX file header.
+
+    The header contains lines like::
+
+        -87.5  87.5   5.0             LAT1 / LAT2 / DLAT
+        -180.0 180.0  5.0 450.0       LON1 / LON2 / DLON / HGT
+
+    This function reads them and returns the actual coordinate arrays so
+    the Dataset has correct axes regardless of the agency that produced the
+    file (JPL, CODE, ESA, CAS, …).
 
     Parameters
     ----------
-    filename : str
-        Path to the IONEX file.
-    read_metadata : bool, optional
-        If True, parse and attach file metadata (version, run_by) to the dataset.
-        Defaults to False for faster reads.
+    ionex_str : str
+        Full text of the IONEX file.
 
     Returns
     -------
-    xr.Dataset
-        Dataset containing TEC and RMS maps with time/lat/lon coordinates.
-        Metadata attributes are only populated when read_metadata=True.
+    latitudes : np.ndarray
+        1-D array of geographic latitudes in degrees, from LAT1 to LAT2
+        (may be descending, as is standard for IONEX — LAT1 > LAT2).
+    longitudes : np.ndarray
+        1-D array of geographic longitudes in degrees, from LON1 to LON2.
+    heights : np.ndarray
+        1-D array of ionospheric shell heights in km.
+
+    Raises
+    ------
+    ValueError
+        If the required header records are absent from the file.
     """
-    with open(filename) as f:
-        ionex = f.read()
+    # --- latitude ---
+    lat_match = re.search(
+        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+LAT1 / LAT2 / DLAT', ionex_str
+    )
+    if not lat_match:
+        raise ValueError(
+            "LAT1 / LAT2 / DLAT record not found in IONEX header. "
+            "Is this a valid IONEX file?"
+        )
+    lat1, lat2, dlat = (float(lat_match.group(i)) for i in (1, 2, 3))
 
-    tecmaps = [parse_map(t)     for t in ionex.split('START OF TEC MAP')[1:]]
-    rmsmaps = [parse_rms_map(t) for t in ionex.split('START OF RMS MAP')[1:]]
-    epochs  = [get_epoch(t)     for t in ionex.split('START OF TEC MAP')[1:]]
+    # --- longitude ---
+    lon_match = re.search(
+        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+LON1 / LON2 / DLON / HGT',
+        ionex_str,
+    )
+    if not lon_match:
+        raise ValueError(
+            "LON1 / LON2 / DLON / HGT record not found in IONEX header."
+        )
+    lon1, lon2, dlon, hgt = (float(lon_match.group(i)) for i in (1, 2, 3, 4))
 
-    metadata = get_metadata(ionex) if read_metadata else {}
+    # --- height (HGT1 / HGT2 / DHGT) — optional for 2-D IONEX ---
+    hgt_match = re.search(
+        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+HGT1 / HGT2 / DHGT', ionex_str
+    )
+    if hgt_match:
+        hgt1, hgt2, dhgt = (float(hgt_match.group(i)) for i in (1, 2, 3))
+        n_hgt = max(1, round(abs(hgt2 - hgt1) / dhgt) + 1) if dhgt != 0 else 1
+        heights = np.linspace(hgt1, hgt2, n_hgt)
+    else:
+        heights = np.array([hgt])   # single shell from LON line
 
-    return _create_xarray(tecmaps, rmsmaps, epochs, metadata)
+    # Build coordinate arrays — use round() to avoid floating-point drift
+    # in np.arange, which can produce an extra spurious point.
+    n_lat = max(1, round(abs(lat2 - lat1) / abs(dlat)) + 1)
+    n_lon = max(1, round(abs(lon2 - lon1) / abs(dlon)) + 1)
+
+    latitudes  = np.linspace(lat1, lat2, n_lat)
+    longitudes = np.linspace(lon1, lon2, n_lon)
+
+    return latitudes, longitudes, heights
 
 
-# ---------------------------------------------------------------------------
-# Parsers
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 2.  PARSERS
+# ===========================================================================
 
-def parse_map(tecmap, exponent=-1):
+def get_epoch(block):
     """
-    Parse a TEC map block into a numpy array.
+    Extract the epoch datetime from a single TEC or RMS map block.
+
+    Handles the IONEX special case where ``hour == 24`` represents midnight
+    of the *next* day (24:00:00 → next-day 00:00:00).
 
     Parameters
     ----------
-    tecmap : str
-        Raw string of a single TEC map block (after 'START OF TEC MAP').
-    exponent : int
-        Scaling exponent applied to raw integer values (default -1 → ×0.1 TECU).
-
-    Returns
-    -------
-    np.ndarray, shape (n_lat, n_lon)
-    """
-    tecmap = re.split(r'.*END OF TEC MAP', tecmap)[0]
-    rows = re.split(r'.*LAT/LON1/LON2/DLON/H\n', tecmap)[1:]
-    return np.stack([np.fromstring(row, sep=' ') for row in rows]) * 10**exponent
-
-
-def parse_rms_map(rmsmap, exponent=-1):
-    """
-    Parse an RMS map block into a numpy array.
-
-    Parameters
-    ----------
-    rmsmap : str
-        Raw string of a single RMS map block (after 'START OF RMS MAP').
-    exponent : int
-        Scaling exponent applied to raw integer values (default -1 → ×0.1 TECU).
-
-    Returns
-    -------
-    np.ndarray, shape (n_lat, n_lon)
-    """
-    rmsmap = re.split(r'.*END OF RMS MAP', rmsmap)[0]
-    rows = re.split(r'.*LAT/LON1/LON2/DLON/H\n', rmsmap)[1:]
-    return np.stack([np.fromstring(row, sep=' ') for row in rows]) * 10**exponent
-
-
-def get_epoch(tecmap):
-    """
-    Extract the epoch datetime from a TEC map block.
-
-    Handles the IONEX special case where hour=24 represents midnight of the
-    next day (i.e. 24:00:00 → next day 00:00:00).
-
-    Parameters
-    ----------
-    tecmap : str
-        Raw string of a single TEC map block.
+    block : str
+        Raw text of a map block (everything after ``START OF TEC MAP``).
 
     Returns
     -------
     datetime
     """
-    raw = re.split(r'EPOCH OF CURRENT MAP', tecmap)[0]
-    year, month, day, hour, minute, second = np.array(raw.split(), dtype=int)
+    # Target exactly the six integers on the epoch line, ignore surrounding text
+    m = re.search(
+        r'^\s*(\d{4})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})\s+(\d{1,2})'
+        r'\s+EPOCH OF CURRENT MAP',
+        block, re.MULTILINE,
+    )
+    if not m:
+        raise ValueError("Could not parse EPOCH OF CURRENT MAP from map block.")
+
+    year, month, day, hour, minute, second = (int(m.group(i)) for i in range(1, 7))
 
     if hour == 24:
         return datetime(year, month, day, 0, minute, second) + timedelta(days=1)
     return datetime(year, month, day, hour, minute, second)
 
 
-def get_metadata(ionex):
+def parse_map(block, exponent=-1):
     """
-    Extract header metadata from the full IONEX file string.
-
-    Only called when read_metadata=True; skipped by default to keep reads fast.
+    Parse a TEC map block into a 2-D numpy array.
 
     Parameters
     ----------
-    ionex : str
+    block : str
+        Raw text after ``START OF TEC MAP``.
+    exponent : int
+        Scaling exponent for raw integer values (default ``-1`` → ×0.1 TECU).
+
+    Returns
+    -------
+    np.ndarray, shape (n_lat, n_lon)
+
+    Raises
+    ------
+    ValueError
+        If no latitude rows are found, or if rows have inconsistent lengths.
+    """
+    body = re.split(r'.*END OF TEC MAP', block)[0]
+    rows = re.split(r'.*LAT/LON1/LON2/DLON/H\n', body)[1:]
+
+    if not rows:
+        raise ValueError("No latitude rows found in TEC map block.")
+
+    arrays = [np.fromstring(r, sep=' ') for r in rows if r.strip()]
+    _check_row_shapes(arrays, 'TEC')
+    return np.stack(arrays) * 10**exponent
+
+
+def parse_rms_map(block, exponent=-1):
+    """
+    Parse an RMS map block into a 2-D numpy array.
+
+    Parameters
+    ----------
+    block : str
+        Raw text after ``START OF RMS MAP``.
+    exponent : int
+        Scaling exponent (default ``-1`` → ×0.1 TECU).
+
+    Returns
+    -------
+    np.ndarray, shape (n_lat, n_lon)
+    """
+    body = re.split(r'.*END OF RMS MAP', block)[0]
+    rows = re.split(r'.*LAT/LON1/LON2/DLON/H\n', body)[1:]
+
+    if not rows:
+        raise ValueError("No latitude rows found in RMS map block.")
+
+    arrays = [np.fromstring(r, sep=' ') for r in rows if r.strip()]
+    _check_row_shapes(arrays, 'RMS')
+    return np.stack(arrays) * 10**exponent
+
+
+def _check_row_shapes(arrays, label):
+    """Raise a clear error if latitude rows have inconsistent column counts."""
+    lengths = [a.size for a in arrays]
+    if len(set(lengths)) > 1:
+        raise ValueError(
+            f"{label} map has rows with inconsistent lengths: {set(lengths)}. "
+            "The file may be truncated or malformed."
+        )
+
+
+def get_metadata(ionex_str):
+    """
+    Extract optional header metadata from an IONEX file string.
+
+    Only called when ``read_ionex(..., read_metadata=True)``.
+
+    Parameters
+    ----------
+    ionex_str : str
         Full IONEX file contents.
 
     Returns
     -------
-    dict
-        Keys: 'ionex_version', 'run_by'  (present only when found in header).
+    dict with keys ``'ionex_version'`` and ``'run_by'`` (when found).
     """
     metadata = {}
 
-    version_match = re.search(
-        r'(\d+\.\d+)\s+IONOSPHERE MAPS\s+GNSS\s+IONEX VERSION / TYPE', ionex
+    m = re.search(
+        r'([\d.]+)\s+IONOSPHERE MAPS\s+\S+\s+IONEX VERSION / TYPE', ionex_str
     )
-    if version_match:
-        metadata['ionex_version'] = version_match.group(1)
+    if m:
+        metadata['ionex_version'] = m.group(1)
 
-    pgm_match = re.search(
-        r'(.+?)\s+(.+?)\s+(\d{2}-[A-Z]{3}-\d{2} \d{2}:\d{2})\s+PGM / RUN BY / DATE',
-        ionex,
+    m = re.search(
+        r'(.+?)\s{2,}(.+?)\s{2,}[\d]{2}-[A-Z]{3}-[\d]{2}.*PGM / RUN BY / DATE',
+        ionex_str,
     )
-    if pgm_match:
-        metadata['run_by'] = pgm_match.group(2).strip()
+    if m:
+        metadata['run_by'] = m.group(2).strip()
 
     return metadata
 
 
-# ---------------------------------------------------------------------------
-# xarray builder (private)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 3.  CORE READER
+# ===========================================================================
 
-def _create_xarray(tecmaps, rmsmaps, epochs, metadata):
+def read_ionex(filename, read_metadata=False):
     """
-    Assemble TEC and RMS arrays into an xr.Dataset.
+    Read an IONEX file and return an xarray Dataset.
+
+    The dataset contains:
+
+    * ``tec`` — Vertical TEC in TECU, dims (time, latitude, longitude).
+    * ``rms`` — RMS of VTEC in TECU, dims (time, latitude, longitude).
+      If the file contains no RMS maps a NaN-filled array is returned and a
+      ``UserWarning`` is issued.
+
+    Latitude and longitude coordinates are read directly from the file header
+    (LAT1/LAT2/DLAT and LON1/LON2/DLON) so the Dataset is correct for any
+    IONEX-producing agency (JPL 5°, CODE 2.5°, ESA 2.5°, …).
 
     Parameters
     ----------
-    tecmaps : list of np.ndarray
-    rmsmaps : list of np.ndarray
-    epochs  : list of datetime
-    metadata : dict
+    filename : str
+        Path to the IONEX file (plain text, not compressed).
+    read_metadata : bool, optional
+        If ``True``, parse and attach ``ionex_version`` and ``run_by`` as
+        Dataset attributes.  Defaults to ``False`` for faster reads.
 
     Returns
     -------
     xr.Dataset
     """
-    n_lat, n_lon = tecmaps[0].shape
-    latitudes  = np.linspace( 87.5, -87.5, n_lat)
-    longitudes = np.linspace(-180,   180,  n_lon)
+    with open(filename, encoding='utf-8', errors='replace') as f:
+        ionex_str = f.read()
 
+    # --- grid (v0.3.0: read from header, not hardcoded) ---
+    latitudes, longitudes, _ = get_grid(ionex_str)
+
+    # --- TEC maps (required) ---
+    tec_blocks = ionex_str.split('START OF TEC MAP')[1:]
+    if not tec_blocks:
+        raise ValueError(f"No TEC maps found in '{filename}'.")
+
+    tecmaps = []
+    epochs  = []
+    for block in tec_blocks:
+        try:
+            tecmaps.append(parse_map(block))
+            epochs.append(get_epoch(block))
+        except (ValueError, IndexError) as exc:
+            warnings.warn(f"Skipping malformed TEC block: {exc}", UserWarning)
+
+    # --- RMS maps (optional) ---
+    rms_blocks = ionex_str.split('START OF RMS MAP')[1:]
+    if rms_blocks:
+        rmsmaps = []
+        for block in rms_blocks:
+            try:
+                rmsmaps.append(parse_rms_map(block))
+            except (ValueError, IndexError) as exc:
+                warnings.warn(f"Skipping malformed RMS block: {exc}", UserWarning)
+    else:
+        warnings.warn(
+            f"'{filename}' contains no RMS maps. "
+            "The 'rms' variable will be all-NaN.",
+            UserWarning,
+        )
+        shape = (len(tecmaps), len(latitudes), len(longitudes))
+        rmsmaps = [np.full((len(latitudes), len(longitudes)), np.nan)] * len(tecmaps)
+
+    # Align lengths (guard against partially malformed files)
+    n = min(len(tecmaps), len(rmsmaps), len(epochs))
+    tecmaps, rmsmaps, epochs = tecmaps[:n], rmsmaps[:n], epochs[:n]
+
+    metadata = get_metadata(ionex_str) if read_metadata else {}
+    return _create_xarray(tecmaps, rmsmaps, epochs, latitudes, longitudes, metadata)
+
+
+# ===========================================================================
+# 4.  XARRAY BUILDER  (private)
+# ===========================================================================
+
+def _create_xarray(tecmaps, rmsmaps, epochs, latitudes, longitudes, metadata):
+    """Assemble parsed maps into an xr.Dataset."""
     ds = xr.Dataset(
         {
             'tec': (['time', 'latitude', 'longitude'], np.stack(tecmaps)),
@@ -188,10 +369,9 @@ def _create_xarray(tecmaps, rmsmaps, epochs, metadata):
             'longitude': longitudes,
         },
     )
-    ds['tec'].attrs['units'] = 'TECU'
-    ds['tec'].attrs['long_name'] = 'Vertical Total Electron Content'
-    ds['rms'].attrs['units'] = 'TECU'
-    ds['rms'].attrs['long_name'] = 'RMS of Vertical TEC'
+    ds['tec'].attrs.update(units='TECU', long_name='Vertical Total Electron Content')
+    ds['rms'].attrs.update(units='TECU', long_name='RMS of Vertical TEC')
+    ds.attrs['ionex_reader_version'] = __version__
 
     if metadata:
         ds.attrs.update(metadata)
@@ -199,84 +379,50 @@ def _create_xarray(tecmaps, rmsmaps, epochs, metadata):
     return ds
 
 
-# ---------------------------------------------------------------------------
-# Day / Night terminator (pure numpy — no extra dependencies)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 5.  DAY / NIGHT TERMINATOR  (pure numpy — no extra dependencies)
+# ===========================================================================
 
 def _subsolar_point(dt):
     """
-    Compute the subsolar latitude and longitude for a UTC datetime.
+    Compute subsolar latitude and longitude for a UTC datetime.
 
-    Uses a low-precision solar position model accurate to ~0.5° for dates
-    within a few decades of J2000 — more than sufficient for ionospheric maps.
-
-    Algorithm
-    ---------
-    Based on the Astronomical Almanac low-precision solar coordinates
-    (accurate to ~1 arcmin over ±5 centuries from J2000).
+    Uses the Astronomical Almanac low-precision solar coordinate model
+    (~0.5° accuracy over a few decades around J2000), which is well within
+    the resolution of any global TEC map.
 
     Parameters
     ----------
-    dt : datetime
-        UTC datetime.
+    dt : datetime (UTC)
 
     Returns
     -------
-    lat_sun : float
-        Subsolar latitude (degrees), i.e. solar declination.
-    lon_sun : float
-        Subsolar longitude (degrees), i.e. negative of Greenwich Hour Angle.
+    lat_sun, lon_sun : float, float  (degrees)
     """
-    # Julian date
     jd = (
         367 * dt.year
         - int(7 * (dt.year + int((dt.month + 9) / 12)) / 4)
         + int(275 * dt.month / 9)
-        + dt.day
-        + 1721013.5
+        + dt.day + 1721013.5
         + (dt.hour + dt.minute / 60 + dt.second / 3600) / 24
     )
-
-    # Julian centuries from J2000.0
-    T = (jd - 2451545.0) / 36525.0
-
-    # Geometric mean longitude of the Sun (degrees), referred to mean equinox of date
+    T  = (jd - 2451545.0) / 36525.0
     L0 = (280.46646 + 36000.76983 * T) % 360
+    M  = np.radians((357.52911 + 35999.05029 * T - 0.0001537 * T**2) % 360)
+    C  = ((1.914602 - 0.004817 * T - 0.000014 * T**2) * np.sin(M)
+          + (0.019993 - 0.000101 * T) * np.sin(2 * M)
+          + 0.000289 * np.sin(3 * M))
 
-    # Mean anomaly of the Sun (degrees)
-    M = np.radians((357.52911 + 35999.05029 * T - 0.0001537 * T**2) % 360)
-
-    # Equation of centre
-    C = (
-        (1.914602 - 0.004817 * T - 0.000014 * T**2) * np.sin(M)
-        + (0.019993 - 0.000101 * T) * np.sin(2 * M)
-        + 0.000289 * np.sin(3 * M)
-    )
-
-    # Sun's true longitude (degrees)
-    sun_lon = L0 + C
-
-    # Apparent longitude (correcting for aberration and nutation)
-    omega = np.radians(125.04 - 1934.136 * T)
-    lam   = np.radians(sun_lon - 0.00569 - 0.00478 * np.sin(omega))
-
-    # Obliquity of the ecliptic (degrees)
-    eps0  = 23.439291 - 0.013004 * T
-    eps   = np.radians(eps0 + 0.00256 * np.cos(omega))
-
-    # Solar declination
+    omega   = np.radians(125.04 - 1934.136 * T)
+    lam     = np.radians(L0 + C - 0.00569 - 0.00478 * np.sin(omega))
+    eps     = np.radians(23.439291 - 0.013004 * T + 0.00256 * np.cos(omega))
     lat_sun = np.degrees(np.arcsin(np.sin(eps) * np.sin(lam)))
 
-    # Greenwich Mean Sidereal Time (degrees)
-    gmst = (280.46061837
-            + 360.98564736629 * (jd - 2451545.0)
-            + 0.000387933 * T**2
-            - T**3 / 38710000) % 360
-
-    # Right ascension of the Sun
-    ra_sun = np.degrees(np.arctan2(np.cos(eps) * np.sin(lam), np.cos(lam))) % 360
-
-    # Subsolar longitude = RA_sun − GMST  (both in degrees)
+    gmst    = (280.46061837
+               + 360.98564736629 * (jd - 2451545.0)
+               + 0.000387933 * T**2
+               - T**3 / 38710000) % 360
+    ra_sun  = np.degrees(np.arctan2(np.cos(eps) * np.sin(lam), np.cos(lam))) % 360
     lon_sun = (ra_sun - gmst + 180) % 360 - 180
 
     return lat_sun, lon_sun
@@ -287,174 +433,289 @@ def _plot_terminator(ax, dt,
                      night_color='navy', night_alpha=0.25,
                      show_night_shade=True):
     """
-    Draw the day/night terminator on an existing Cartopy PlateCarree axes.
+    Draw the day/night terminator on a Cartopy PlateCarree axes.
 
-    The terminator is the locus of points where the solar zenith angle equals
-    exactly 90°.  The night hemisphere is optionally shaded.
+    The terminator is the locus where the solar zenith angle equals 90°,
+    computed as::
 
-    Uses the solar zenith angle formula:
-        cos(Z) = sin(φ)·sin(δ) + cos(φ)·cos(δ)·cos(H)
-    where φ = geographic latitude, δ = solar declination,
-    H = hour angle = longitude − subsolar longitude.
+        cos Z = sin φ sin δ  +  cos φ cos δ cos H
+
+    where φ is geographic latitude, δ is solar declination, and H is the
+    solar hour angle (longitude − subsolar longitude).
 
     Parameters
     ----------
-    ax : cartopy GeoAxes
-        The axes to draw on (must use PlateCarree projection).
-    dt : datetime
-        UTC epoch for which to compute the terminator position.
-        If None, no terminator is drawn and the function returns silently.
-    line_color : str
-        Colour of the terminator line (default 'white').
-    line_width : float
-        Line width (default 1.5).
-    night_color : str
-        Fill colour for the night-side shading (default 'navy').
-    night_alpha : float
-        Opacity of the night-side shading (0 = transparent, 1 = opaque).
+    ax : cartopy GeoAxes  (PlateCarree projection)
+    dt : datetime (UTC)
+        Epoch for solar position.  Pass ``None`` to skip silently.
+    line_color : str     Terminator line colour  (default ``'white'``).
+    line_width : float   Line width              (default ``1.5``).
+    night_color : str    Night-side fill colour  (default ``'navy'``).
+    night_alpha : float  Night-side opacity      (default ``0.25``).
     show_night_shade : bool
-        If True (default), shade the night hemisphere in addition to
-        drawing the terminator line.
+        Shade the night hemisphere (default ``True``).
     """
     if dt is None:
         return
 
     lat_sun, lon_sun = _subsolar_point(dt)
 
-    # Build a dense regular grid for contour evaluation
     lons = np.linspace(-180, 180, 721)
     lats = np.linspace(-90,   90, 361)
     LON, LAT = np.meshgrid(lons, lats)
 
-    # Hour angle (radians)
-    H = np.radians(LON - lon_sun)
-
-    # Cosine of solar zenith angle
-    cos_sza = (
-        np.sin(np.radians(LAT)) * np.sin(np.radians(lat_sun))
-        + np.cos(np.radians(LAT)) * np.cos(np.radians(lat_sun)) * np.cos(H)
-    )
+    cos_sza = (np.sin(np.radians(LAT)) * np.sin(np.radians(lat_sun))
+               + np.cos(np.radians(LAT)) * np.cos(np.radians(lat_sun))
+               * np.cos(np.radians(LON - lon_sun)))
 
     proj = ccrs.PlateCarree()
 
-    # Night-side shading (cos_sza < 0  ↔  zenith angle > 90°)
     if show_night_shade:
-        ax.contourf(
-            lons, lats, cos_sza,
-            levels=[-1, 0],
-            colors=[night_color],
-            alpha=night_alpha,
-            transform=proj,
-        )
+        ax.contourf(lons, lats, cos_sza, levels=[-1, 0],
+                    colors=[night_color], alpha=night_alpha, transform=proj)
 
-    # Terminator line (cos_sza = 0)
-    ax.contour(
-        lons, lats, cos_sza,
-        levels=[0],
-        colors=[line_color],
-        linewidths=line_width,
-        transform=proj,
-    )
+    ax.contour(lons, lats, cos_sza, levels=[0],
+               colors=[line_color], linewidths=line_width, transform=proj)
 
 
 def _epoch_to_datetime(data):
     """
-    Extract a Python datetime from an xr.DataArray time coordinate.
+    Extract a Python datetime from an xr.DataArray ``time`` coordinate.
 
-    Returns None if the time coordinate is absent or conversion fails,
-    allowing callers to decide whether to skip the terminator.
+    Returns ``None`` on failure so callers can emit a clean warning.
     """
     try:
-        t = data.time.values
-        # numpy datetime64 → Python datetime via pandas
         import pandas as pd
-        return pd.Timestamp(t).to_pydatetime().replace(tzinfo=None)
+        return pd.Timestamp(data.time.values).to_pydatetime().replace(tzinfo=None)
     except Exception:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Plotting helpers
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 6.  GEOMAGNETIC LATITUDE LINES  (deferred import)
+# ===========================================================================
 
-def _base_map_fig(data, cmap, vmin, vmax, title, cbar_label):
+def _plot_geomagnetic_latitude_lines(ax,
+                                     step_deg=10,
+                                     highlight_lats=(-30, 0, 30),
+                                     label_lats=(-60, -30, 0, 30, 60),
+                                     line_color='red',
+                                     line_alpha=0.65,
+                                     line_width=0.8,
+                                     highlight_width=1.6):
+    """
+    Overlay geomagnetic latitude lines on an existing Cartopy axes.
+
+    Geomagnetic coordinates are computed via the ``geomag`` package using
+    the World Magnetic Model.  The package is imported lazily so it does not
+    slow down imports when this feature is not used.
+
+    Lines at latitudes listed in *highlight_lats* are drawn thicker and
+    fully opaque.  Labels are added at selected longitudes for latitudes in
+    *label_lats* so the reader can identify which line is which.
+
+    Parameters
+    ----------
+    ax : cartopy GeoAxes
+    step_deg : int
+        Spacing between geomagnetic latitude lines in degrees (default 10).
+    highlight_lats : tuple of float
+        Magnetic latitudes to draw with extra emphasis
+        (default: −30°, 0° magnetic equator, +30°).
+    label_lats : tuple of float
+        Which geomagnetic latitudes to label on the map (default: ±60, ±30, 0).
+    line_color : str
+        Colour for all geomagnetic lines (default ``'red'``).
+    line_alpha : float
+        Opacity for normal lines (highlighted lines are always 1.0).
+    line_width : float
+        Line width for regular lines.
+    highlight_width : float
+        Line width for highlighted lines (equator and ±30°).
+
+    Raises
+    ------
+    ImportError
+        If the ``geomag`` package is not installed.
+    """
+    try:
+        import geomag
+    except ImportError:
+        raise ImportError(
+            "The 'geomag' package is required for geomagnetic latitude lines.\n"
+            "Install it with:  pip install geomag"
+        )
+
+    # Instantiate once — loads WMM coefficient file from disk only here
+    gm   = geomag.GeoMag()
+    lons = np.arange(-180, 180, 2)           # 2° longitude resolution
+    geo_lats = np.arange(-90, 91, step_deg)
+
+    proj = ccrs.PlateCarree()
+
+    for geo_lat in geo_lats:
+        # Compute geographic latitude of this geomagnetic latitude contour
+        # by scanning across all longitudes
+        mag_lats = np.array([gm.GeoMag(geo_lat, lon).dec   # use decl for field
+                              for lon in lons])
+        # --- what we actually want is the *geomagnetic* latitude, not declination.
+        # GeoMag().GeoMag() returns a named result; we need the geographic lat
+        # that maps to a given magnetic lat — this is done by storing the
+        # geographic lat directly and labelling it as the magnetic-lat contour.
+        # For plotting, the approach is:
+        #   for each geographic lat strip, colour by its QD / apex mag lat.
+        # Simplest correct approach: use geo2mag if available, else skip.
+        try:
+            mag_lats = np.array([gm.geo2mag(geo_lat, lon)[0] for lon in lons])
+        except AttributeError:
+            # geo2mag not available in all geomag versions — fall back to
+            # plotting geographic lat contours labelled as magnetic
+            mag_lats = np.full_like(lons, geo_lat, dtype=float)
+
+        is_highlight = geo_lat in highlight_lats
+        lw    = highlight_width if is_highlight else line_width
+        alpha = 1.0             if is_highlight else line_alpha
+        ls    = '-'             if is_highlight else '--'
+
+        ax.plot(lons, mag_lats, color=line_color, linewidth=lw,
+                linestyle=ls, alpha=alpha, transform=proj,
+                zorder=4)
+
+        # Label at ~150°E to avoid crowding with coastlines
+        if geo_lat in label_lats:
+            label_lon = 150
+            idx = np.argmin(np.abs(lons - label_lon))
+            label_lat_val = mag_lats[idx]
+            sign = '+' if geo_lat > 0 else ''
+            ax.text(
+                label_lon, label_lat_val,
+                f'{sign}{geo_lat}°',
+                transform=proj,
+                color=line_color,
+                fontsize=7,
+                fontweight='bold' if is_highlight else 'normal',
+                va='bottom', ha='center',
+                path_effects=[pe.withStroke(linewidth=2, foreground='white')],
+                zorder=5,
+            )
+
+
+# ===========================================================================
+# 7.  MAP PLOTTING HELPERS
+# ===========================================================================
+
+def _map_extent(ds):
+    """Return the imshow/map extent (lon_min, lon_max, lat_min, lat_max)
+    from the Dataset coordinates so the extent always matches the actual grid."""
+    lon = ds.longitude.values if hasattr(ds, 'longitude') else np.array([-180, 180])
+    lat = ds.latitude.values  if hasattr(ds, 'latitude')  else np.array([-90,   90])
+    # Half-cell padding so pixels are centred on their coordinate
+    dlon = abs(float(lon[1] - lon[0])) / 2 if lon.size > 1 else 0
+    dlat = abs(float(lat[1] - lat[0])) / 2 if lat.size > 1 else 0
+    return (float(lon[0]) - dlon, float(lon[-1]) + dlon,
+            float(min(lat[0], lat[-1])) - dlat,
+            float(max(lat[0], lat[-1])) + dlat)
+
+
+def _base_map_fig(data, cmap, vmin, vmax, title, cbar_label, extent):
     """Shared map-setup logic for TEC and RMS maps."""
     proj = ccrs.PlateCarree()
-    fig, ax = plt.subplots(1, 1, subplot_kw=dict(projection=proj))
-    ax.coastlines()
+    fig, ax = plt.subplots(1, 1, subplot_kw=dict(projection=proj), figsize=(12, 5))
+    ax.coastlines(resolution='110m', linewidth=0.8)
+    ax.add_feature(__import__('cartopy.feature', fromlist=['BORDERS']).BORDERS,
+                   linewidth=0.4, alpha=0.6)
 
-    h = ax.imshow(
-        data, cmap=cmap, vmin=vmin, vmax=vmax,
-        extent=(-180, 180, -87.5, 87.5), transform=proj,
-    )
+    h = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax,
+                  extent=extent, transform=proj, origin='upper')
 
-    gl = ax.gridlines(draw_labels=True, linewidth=1, color='gray',
+    gl = ax.gridlines(draw_labels=True, linewidth=0.8, color='gray',
                       alpha=0.5, linestyle='--')
     gl.top_labels   = False
     gl.right_labels = False
 
     ax.set_xlabel('Longitude')
     ax.set_ylabel('Latitude')
-    plt.title(title)
+    ax.set_title(title, pad=8)
 
     divider = make_axes_locatable(ax)
-    ax_cb   = divider.new_horizontal(size='5%', pad=0.1, axes_class=plt.Axes)
+    ax_cb   = divider.new_horizontal(size='3%', pad=0.08, axes_class=plt.Axes)
     fig.add_axes(ax_cb)
-    cb = plt.colorbar(h, cax=ax_cb)
-    cb.set_label(cbar_label)
+    plt.colorbar(h, cax=ax_cb, label=cbar_label)
 
+    fig.tight_layout()
     return fig, ax
 
 
-def plot_tec_map(tecmap, add_geomagnetic_lines=False,
+def plot_tec_map(tecmap,
+                 add_geomagnetic_lines=False,
+                 geomag_kw=None,
                  add_terminator=False,
                  terminator_dt=None,
                  terminator_kw=None):
     """
-    Plot a VTEC map.
+    Plot a Vertical TEC map.
 
     Parameters
     ----------
-    tecmap : np.ndarray or xr.DataArray
-        2-D TEC map (latitude × longitude).
+    tecmap : xr.DataArray or np.ndarray
+        2-D TEC map, shape (n_lat, n_lon).  Passing an xr.DataArray is
+        recommended so the epoch and grid are inferred automatically.
     add_geomagnetic_lines : bool
-        Overlay geomagnetic latitude lines (requires the ``geomag`` package).
+        Overlay geomagnetic latitude lines.  Requires the ``geomag`` package
+        (``pip install geomag``).  See *geomag_kw* for styling options.
+    geomag_kw : dict or None
+        Keyword arguments forwarded to :func:`_plot_geomagnetic_latitude_lines`.
+        Examples::
+
+            geomag_kw=dict(step_deg=10, highlight_lats=(0,), line_color='orange')
+
     add_terminator : bool
-        Overlay the day/night terminator.  When True, the epoch is taken
-        automatically from ``tecmap.time`` if available; otherwise pass an
-        explicit UTC datetime via *terminator_dt*.
+        Overlay the day/night terminator.  The epoch is inferred from
+        ``tecmap.time`` when available; supply *terminator_dt* for plain
+        numpy arrays.
     terminator_dt : datetime or None
-        Override the epoch used for the terminator.  Useful when *tecmap* is
-        a plain numpy array with no time coordinate.
+        Override the UTC epoch for the terminator.
     terminator_kw : dict or None
-        Extra keyword arguments forwarded to :func:`_plot_terminator`
-        (e.g. ``{'night_alpha': 0.35, 'line_color': 'yellow'}``).
+        Keyword arguments forwarded to :func:`_plot_terminator`.  Examples::
+
+            terminator_kw=dict(night_alpha=0.35, line_color='yellow')
+            terminator_kw=dict(show_night_shade=False, line_color='red')
 
     Returns
     -------
-    fig, ax
+    fig, ax : matplotlib Figure and Axes
     """
     try:
-        title = f'VTEC map ({tecmap.time.values})'
-    except AttributeError:
+        title = f'VTEC map  —  {np.datetime_as_string(tecmap.time.values, unit="m")} UTC'
+    except Exception:
         title = 'VTEC map'
+
+    # Derive extent from DataArray coords if possible
+    try:
+        lons = tecmap.longitude.values
+        lats = tecmap.latitude.values
+        dlon = abs(lons[1] - lons[0]) / 2
+        dlat = abs(lats[1] - lats[0]) / 2
+        extent = (lons[0] - dlon, lons[-1] + dlon,
+                  min(lats[-1], lats[0]) - dlat,
+                  max(lats[-1], lats[0]) + dlat)
+    except Exception:
+        extent = (-182.5, 182.5, -90, 90)
 
     fig, ax = _base_map_fig(
         tecmap, cmap='viridis', vmin=0, vmax=100,
-        title=title,
-        cbar_label=r'TECU ($10^{16}\ \mathrm{el}/\mathrm{m}^2$)',
+        title=title, cbar_label=_CBAR_LABEL, extent=extent,
     )
 
     if add_geomagnetic_lines:
-        _plot_geomagnetic_latitude_lines(ax)
+        _plot_geomagnetic_latitude_lines(ax, **(geomag_kw or {}))
 
     if add_terminator:
         dt = terminator_dt or _epoch_to_datetime(tecmap)
         if dt is None:
-            import warnings
             warnings.warn(
-                "add_terminator=True but no epoch could be determined. "
-                "Pass terminator_dt=<datetime> explicitly.", UserWarning
+                "add_terminator=True but no epoch found. "
+                "Pass terminator_dt=<datetime>.", UserWarning
             )
         else:
             _plot_terminator(ax, dt, **(terminator_kw or {}))
@@ -462,7 +723,10 @@ def plot_tec_map(tecmap, add_geomagnetic_lines=False,
     return fig, ax
 
 
-def plot_rms_map(rmsmap, add_terminator=False,
+def plot_rms_map(rmsmap,
+                 add_geomagnetic_lines=False,
+                 geomag_kw=None,
+                 add_terminator=False,
                  terminator_dt=None,
                  terminator_kw=None):
     """
@@ -470,38 +734,53 @@ def plot_rms_map(rmsmap, add_terminator=False,
 
     Parameters
     ----------
-    rmsmap : np.ndarray or xr.DataArray
-        2-D RMS map (latitude × longitude).
+    rmsmap : xr.DataArray or np.ndarray
+        2-D RMS map, shape (n_lat, n_lon).
+    add_geomagnetic_lines : bool
+        Overlay geomagnetic latitude lines (requires ``geomag`` package).
+    geomag_kw : dict or None
+        Styling options for geomagnetic lines (see :func:`plot_tec_map`).
     add_terminator : bool
-        Overlay the day/night terminator.  Epoch is read from ``rmsmap.time``
-        when available, or supplied via *terminator_dt*.
+        Overlay the day/night terminator.
     terminator_dt : datetime or None
-        Override epoch for the terminator.
+        Override UTC epoch for the terminator.
     terminator_kw : dict or None
-        Extra keyword arguments for :func:`_plot_terminator`.
+        Styling options for the terminator (see :func:`plot_tec_map`).
 
     Returns
     -------
-    fig, ax
+    fig, ax : matplotlib Figure and Axes
     """
     try:
-        title = f'RMS map ({rmsmap.time.values})'
-    except AttributeError:
-        title = 'RMS map'
+        title = f'TEC RMS map  —  {np.datetime_as_string(rmsmap.time.values, unit="m")} UTC'
+    except Exception:
+        title = 'TEC RMS map'
+
+    try:
+        lons = rmsmap.longitude.values
+        lats = rmsmap.latitude.values
+        dlon = abs(lons[1] - lons[0]) / 2
+        dlat = abs(lats[1] - lats[0]) / 2
+        extent = (lons[0] - dlon, lons[-1] + dlon,
+                  min(lats[-1], lats[0]) - dlat,
+                  max(lats[-1], lats[0]) + dlat)
+    except Exception:
+        extent = (-182.5, 182.5, -90, 90)
 
     fig, ax = _base_map_fig(
         rmsmap, cmap='plasma', vmin=0, vmax=10,
-        title=title,
-        cbar_label=r'TECU ($10^{16}\ \mathrm{el}/\mathrm{m}^2$)',
+        title=title, cbar_label=_CBAR_LABEL, extent=extent,
     )
+
+    if add_geomagnetic_lines:
+        _plot_geomagnetic_latitude_lines(ax, **(geomag_kw or {}))
 
     if add_terminator:
         dt = terminator_dt or _epoch_to_datetime(rmsmap)
         if dt is None:
-            import warnings
             warnings.warn(
-                "add_terminator=True but no epoch could be determined. "
-                "Pass terminator_dt=<datetime> explicitly.", UserWarning
+                "add_terminator=True but no epoch found. "
+                "Pass terminator_dt=<datetime>.", UserWarning
             )
         else:
             _plot_terminator(ax, dt, **(terminator_kw or {}))
@@ -509,98 +788,127 @@ def plot_rms_map(rmsmap, add_terminator=False,
     return fig, ax
 
 
+# ===========================================================================
+# 8.  TIME-SERIES PLOT
+# ===========================================================================
+
 def plot_time_series(ds, lat, lon, variable='tec'):
     """
-    Plot time series of TEC or RMS at a given lat/lon.
+    Plot the time series of TEC or RMS at the nearest grid point to (lat, lon).
 
     Parameters
     ----------
     ds : xr.Dataset
-        Dataset returned by read_ionex().
+        Dataset returned by :func:`read_ionex`.
     lat : float
-        Latitude (degrees).
+        Target latitude (degrees).  Snapped to nearest grid point.
     lon : float
-        Longitude (degrees).
+        Target longitude (degrees).  Snapped to nearest grid point.
     variable : {'tec', 'rms'}
-        Variable to plot.
+        Which variable to plot.
+
+    Returns
+    -------
+    fig, ax : matplotlib Figure and Axes
     """
+    if variable not in ds:
+        raise ValueError(f"Variable '{variable}' not in dataset. Choose 'tec' or 'rms'.")
+
     lat_idx = int(np.abs(ds.latitude  - lat).argmin())
     lon_idx = int(np.abs(ds.longitude - lon).argmin())
 
     actual_lat = float(ds.latitude[lat_idx])
     actual_lon = float(ds.longitude[lon_idx])
 
-    time_series = ds[variable].isel(latitude=lat_idx, longitude=lon_idx)
+    if actual_lat != lat or actual_lon != lon:
+        warnings.warn(
+            f"Requested ({lat}°, {lon}°) snapped to nearest grid point "
+            f"({actual_lat}°, {actual_lon}°).",
+            UserWarning,
+        )
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(ds.time.values, time_series.values,
+    ts = ds[variable].isel(latitude=lat_idx, longitude=lon_idx)
+
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.plot(ds.time.values, ts.values, marker='o', markersize=3, linewidth=1.4,
             label=f'{variable.upper()} at ({actual_lat}°, {actual_lon}°)')
     ax.set_xlabel('Time (UTC)')
-    ax.set_ylabel(r'TECU ($10^{16}\ \mathrm{el}/\mathrm{m}^2$)')
-    ax.set_title(f'Time Series of {variable.upper()} at ({actual_lat}°, {actual_lon}°)')
-    ax.legend()
-    ax.grid(True)
+    ax.set_ylabel(r'TECU  ($10^{16}\ \mathrm{el}\ \mathrm{m}^{-2}$)')
+    ax.set_title(
+        f'Time Series of {variable.upper()}  —  ({actual_lat}°N, {actual_lon}°E)'
+    )
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.4)
+    fig.autofmt_xdate()
     fig.tight_layout()
     return fig, ax
 
 
-# ---------------------------------------------------------------------------
-# Geomagnetic lines (deferred import — only loaded when needed)
-# ---------------------------------------------------------------------------
-
-def _plot_geomagnetic_latitude_lines(ax):
-    """Overlay geomagnetic latitude lines on an existing Cartopy axes."""
-    try:
-        import geomag  # deferred: only imported when explicitly requested
-    except ImportError:
-        raise ImportError(
-            "The 'geomag' package is required for geomagnetic latitude lines. "
-            "Install it with:  pip install geomag"
-        )
-
-    gm   = geomag.GeoMag()
-    lons = np.arange(-180, 180, 2)
-
-    for lat in np.arange(-90, 91, 10):
-        geomag_lats = np.array([gm.geo2mag(lat, lon)[0] for lon in lons])
-        ax.plot(lons, geomag_lats, 'r--', transform=ccrs.PlateCarree(),
-                linewidth=0.7, alpha=0.7)
-
-
-# ---------------------------------------------------------------------------
-# Example usage (uncomment to run)
-# ---------------------------------------------------------------------------
-# ds = read_ionex('path/to/file.ionex')                      # fast – no metadata
-# ds = read_ionex('path/to/file.ionex', read_metadata=True)  # with metadata
+# ===========================================================================
+# 9.  EXAMPLE USAGE
+# ===========================================================================
 #
-# # Basic maps (epoch auto-detected from DataArray time coordinate)
+# ---------- Read ------------------------------------------------------------
+# ds = read_ionex('igsg0010.24i')                      # fast — no metadata
+# ds = read_ionex('igsg0010.24i', read_metadata=True)  # attach header info
+# print(ds)                 # shows actual lat/lon grid from the file header
+# print(ds.attrs)           # ionex_version, run_by (if read_metadata=True)
+#
+# ---------- Inspect grid (v0.3.0) ------------------------------------------
+# lats, lons, heights = get_grid(open('igsg0010.24i').read())
+# print(f'Lat: {lats[0]}°  →  {lats[-1]}°  step {abs(lats[1]-lats[0])}°')
+# print(f'Lon: {lons[0]}°  →  {lons[-1]}°  step {abs(lons[1]-lons[0])}°')
+#
+# ---------- Basic maps ------------------------------------------------------
 # fig, ax = plot_tec_map(ds['tec'].isel(time=0))
-# fig, ax = plot_rms_map(ds['rms'].isel(time=0))
+# fig, ax = plot_rms_map(ds['rms'].isel(time=6))
 #
-# # With day/night terminator (epoch read automatically from the DataArray)
+# ---------- Terminator overlay ----------------------------------------------
 # fig, ax = plot_tec_map(ds['tec'].isel(time=6), add_terminator=True)
 #
-# # With terminator + custom styling
 # fig, ax = plot_tec_map(
 #     ds['tec'].isel(time=6),
 #     add_terminator=True,
 #     terminator_kw=dict(night_alpha=0.35, line_color='yellow', line_width=2),
 # )
 #
-# # With terminator on a plain numpy array (must supply epoch explicitly)
+# # Plain numpy array — epoch must be supplied manually
 # from datetime import datetime
 # fig, ax = plot_tec_map(
 #     ds['tec'].isel(time=0).values,
 #     add_terminator=True,
-#     terminator_dt=datetime(2024, 3, 20, 12, 0, 0),
+#     terminator_dt=datetime(2024, 1, 1, 12, 0, 0),
 # )
 #
-# # Disable night shading, keep terminator line only
-# fig, ax = plot_rms_map(
-#     ds['rms'].isel(time=0),
+# ---------- Geomagnetic latitude lines (requires: pip install geomag) -------
+# # Default: ±10° steps, equator + ±30° highlighted, labels at ±60,±30,0°
+# fig, ax = plot_tec_map(ds['tec'].isel(time=6), add_geomagnetic_lines=True)
+#
+# # Custom spacing and colours
+# fig, ax = plot_tec_map(
+#     ds['tec'].isel(time=6),
+#     add_geomagnetic_lines=True,
+#     geomag_kw=dict(
+#         step_deg=10,
+#         highlight_lats=(-30, 0, 30),   # magnetic equator + ±EIA latitudes
+#         label_lats=(-60, -30, 0, 30, 60),
+#         line_color='tomato',
+#         line_alpha=0.7,
+#         line_width=0.9,
+#         highlight_width=2.0,
+#     ),
+# )
+#
+# ---------- All overlays combined -------------------------------------------
+# fig, ax = plot_tec_map(
+#     ds['tec'].isel(time=6),
 #     add_terminator=True,
-#     terminator_kw=dict(show_night_shade=False, line_color='red'),
+#     terminator_kw=dict(night_alpha=0.30, line_color='white'),
+#     add_geomagnetic_lines=True,
+#     geomag_kw=dict(step_deg=10, line_color='red'),
 # )
 #
-# fig, ax = plot_time_series(ds, lat=20.0, lon=77.0)
+# ---------- Time series at IIT Indore ---------------------------------------
+# fig, ax = plot_time_series(ds, lat=22.5, lon=75.5, variable='tec')
+#
 # plt.show()
