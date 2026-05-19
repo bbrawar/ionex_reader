@@ -69,7 +69,7 @@ def get_grid(ionex_str):
     The header contains lines like::
 
         -87.5  87.5   5.0             LAT1 / LAT2 / DLAT
-        -180.0 180.0  5.0 450.0       LON1 / LON2 / DLON / HGT
+        -180.0 180.0  5.0             LON1 / LON2 / DLON
 
     This function reads them and returns the actual coordinate arrays so
     the Dataset has correct axes regardless of the agency that produced the
@@ -108,14 +108,14 @@ def get_grid(ionex_str):
 
     # --- longitude ---
     lon_match = re.search(
-        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+LON1 / LON2 / DLON / HGT',
+        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+LON1 / LON2 / DLON',
         ionex_str,
     )
     if not lon_match:
         raise ValueError(
-            "LON1 / LON2 / DLON / HGT record not found in IONEX header."
+            "LON1 / LON2 / DLON record not found in IONEX header."
         )
-    lon1, lon2, dlon, hgt = (float(lon_match.group(i)) for i in (1, 2, 3, 4))
+    lon1, lon2, dlon = (float(lon_match.group(i)) for i in (1, 2, 3))
 
     # --- height (HGT1 / HGT2 / DHGT) — optional for 2-D IONEX ---
     hgt_match = re.search(
