@@ -108,14 +108,14 @@ def get_grid(header):
 
     # --- longitude ---
     lon_match = re.search(
-        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+LON1 / LON2 / DLON / HGT',
+        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+LON1 / LON2 / DLON',
         header,
     )
     if not lon_match:
         raise ValueError(
-            "LON1 / LON2 / DLON / HGT record not found in IONEX header."
+            "LON1 / LON2 / DLON record not found in IONEX header."
         )
-    lon1, lon2, dlon, hgt = (float(lon_match.group(i)) for i in (1, 2, 3, 4))
+    lon1, lon2, dlon = (float(lon_match.group(i)) for i in (1, 2, 3))
 
     # --- height (HGT1 / HGT2 / DHGT) — optional for 2-D IONEX ---
     hgt_match = re.search(
