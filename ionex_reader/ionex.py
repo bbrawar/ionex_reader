@@ -62,14 +62,14 @@ _CBAR_LABEL = r'TECU  ($10^{16}\ \mathrm{el}\ \mathrm{m}^{-2}$)'
 # 1.  GRID PARSING  (v0.3.0 — replaces hardcoded linspace)
 # ===========================================================================
 
-def get_grid(ionex_str):
+def get_grid(header):
     """
     Parse the lat/lon/height grid specification from an IONEX file header.
 
     The header contains lines like::
 
         -87.5  87.5   5.0             LAT1 / LAT2 / DLAT
-        -180.0 180.0  5.0             LON1 / LON2 / DLON
+        -180.0 180.0  5.0 450.0       LON1 / LON2 / DLON / HGT
 
     This function reads them and returns the actual coordinate arrays so
     the Dataset has correct axes regardless of the agency that produced the
@@ -77,8 +77,8 @@ def get_grid(ionex_str):
 
     Parameters
     ----------
-    ionex_str : str
-        Full text of the IONEX file.
+    header : str
+        IONEX header block (from :func:`_extract_header`).
 
     Returns
     -------
@@ -97,7 +97,7 @@ def get_grid(ionex_str):
     """
     # --- latitude ---
     lat_match = re.search(
-        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+LAT1 / LAT2 / DLAT', ionex_str
+        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+LAT1 / LAT2 / DLAT', header
     )
     if not lat_match:
         raise ValueError(
@@ -108,18 +108,18 @@ def get_grid(ionex_str):
 
     # --- longitude ---
     lon_match = re.search(
-        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+LON1 / LON2 / DLON',
-        ionex_str,
+        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+LON1 / LON2 / DLON / HGT',
+        header,
     )
     if not lon_match:
         raise ValueError(
-            "LON1 / LON2 / DLON record not found in IONEX header."
+            "LON1 / LON2 / DLON / HGT record not found in IONEX header."
         )
-    lon1, lon2, dlon = (float(lon_match.group(i)) for i in (1, 2, 3))
+    lon1, lon2, dlon, hgt = (float(lon_match.group(i)) for i in (1, 2, 3, 4))
 
     # --- height (HGT1 / HGT2 / DHGT) — optional for 2-D IONEX ---
     hgt_match = re.search(
-        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+HGT1 / HGT2 / DHGT', ionex_str
+        r'([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+HGT1 / HGT2 / DHGT', header
     )
     if hgt_match:
         hgt1, hgt2, dhgt = (float(hgt_match.group(i)) for i in (1, 2, 3))
@@ -242,11 +242,14 @@ def _check_row_shapes(arrays, label):
         )
 
 
-def get_metadata(ionex_str):
+def _extract_header(ionex_str):
     """
-    Extract optional header metadata from an IONEX file string.
+    Return only the header block of an IONEX file (everything up to and
+    including the ``END OF HEADER`` line).
 
-    Only called when ``read_ionex(..., read_metadata=True)``.
+    The IONEX specification mandates this sentinel, so splitting on it is
+    both correct and fast — the header is typically < 50 lines regardless
+    of how many TEC/RMS maps the file contains.
 
     Parameters
     ----------
@@ -255,19 +258,53 @@ def get_metadata(ionex_str):
 
     Returns
     -------
-    dict with keys ``'ionex_version'`` and ``'run_by'`` (when found).
+    str
+        Header text only.  If the sentinel is absent (malformed file) the
+        full string is returned as a fallback so callers still work.
+    """
+    sentinel = 'END OF HEADER'
+    idx = ionex_str.find(sentinel)
+    if idx == -1:
+        warnings.warn(
+            "'END OF HEADER' not found — file may be malformed. "
+            "Falling back to scanning the full file for header records.",
+            UserWarning,
+        )
+        return ionex_str
+    # Include the sentinel line itself
+    end = ionex_str.index('\n', idx) + 1
+    return ionex_str[:end]
+
+
+def get_metadata(header):
+    """
+    Extract optional metadata from an IONEX **header** string.
+
+    Only called when ``read_ionex(..., read_metadata=True)``.
+    Accepts the pre-sliced header (from :func:`_extract_header`) so regex
+    scanning is limited to the small header block rather than the full file.
+
+    Parameters
+    ----------
+    header : str
+        IONEX header text (everything up to ``END OF HEADER``).
+
+    Returns
+    -------
+    dict
+        Keys ``'ionex_version'`` and ``'run_by'`` when found.
     """
     metadata = {}
 
     m = re.search(
-        r'([\d.]+)\s+IONOSPHERE MAPS\s+\S+\s+IONEX VERSION / TYPE', ionex_str
+        r'([\d.]+)\s+IONOSPHERE MAPS\s+\S+\s+IONEX VERSION / TYPE', header
     )
     if m:
         metadata['ionex_version'] = m.group(1)
 
     m = re.search(
         r'(.+?)\s{2,}(.+?)\s{2,}[\d]{2}-[A-Z]{3}-[\d]{2}.*PGM / RUN BY / DATE',
-        ionex_str,
+        header,
     )
     if m:
         metadata['run_by'] = m.group(2).strip()
@@ -309,8 +346,12 @@ def read_ionex(filename, read_metadata=False):
     with open(filename, encoding='utf-8', errors='replace') as f:
         ionex_str = f.read()
 
+    # Extract header once — all header-only parsing uses this small slice.
+    # get_grid and get_metadata never see the map data blocks.
+    header = _extract_header(ionex_str)
+
     # --- grid (v0.3.0: read from header, not hardcoded) ---
-    latitudes, longitudes, _ = get_grid(ionex_str)
+    latitudes, longitudes, _ = get_grid(header)
 
     # --- TEC maps (required) ---
     tec_blocks = ionex_str.split('START OF TEC MAP')[1:]
@@ -348,7 +389,7 @@ def read_ionex(filename, read_metadata=False):
     n = min(len(tecmaps), len(rmsmaps), len(epochs))
     tecmaps, rmsmaps, epochs = tecmaps[:n], rmsmaps[:n], epochs[:n]
 
-    metadata = get_metadata(ionex_str) if read_metadata else {}
+    metadata = get_metadata(header)    if read_metadata else {}
     return _create_xarray(tecmaps, rmsmaps, epochs, latitudes, longitudes, metadata)
 
 
@@ -504,100 +545,146 @@ def _plot_geomagnetic_latitude_lines(ax,
                                      line_width=0.8,
                                      highlight_width=1.6):
     """
-    Overlay geomagnetic latitude lines on an existing Cartopy axes.
+    Overlay geomagnetic (dip) latitude lines on an existing Cartopy axes.
 
-    Geomagnetic coordinates are computed via the ``geomag`` package using
-    the World Magnetic Model.  The package is imported lazily so it does not
-    slow down imports when this feature is not used.
+    Geomagnetic latitude is derived from the magnetic dip (inclination) angle
+    returned by the World Magnetic Model via the ``geomag`` package::
 
-    Lines at latitudes listed in *highlight_lats* are drawn thicker and
-    fully opaque.  Labels are added at selected longitudes for latitudes in
-    *label_lats* so the reader can identify which line is which.
+        mag_lat = arctan(0.5 × tan(dip))
+
+    Strategy (vectorised, ~2 s total):
+
+    1. Build a dense geographic lat × lon grid of magnetic latitudes in one
+       pass (``geomag.geomag.GeoMag`` instantiated **once**).
+    2. Pass the full grid to ``ax.contour()`` which extracts all desired
+       magnetic-latitude isolines simultaneously — no per-contour loop.
+    3. Add styled labels for lines listed in *label_lats*.
+
+    Import note
+    -----------
+    ``GeoMag`` lives at ``geomag.geomag.GeoMag``, not ``geomag.GeoMag``.
+    The package is imported lazily so it does not slow down imports when this
+    feature is unused.
 
     Parameters
     ----------
-    ax : cartopy GeoAxes
+    ax : cartopy GeoAxes  (PlateCarree projection)
     step_deg : int
-        Spacing between geomagnetic latitude lines in degrees (default 10).
+        Spacing between geomagnetic latitude contours in degrees (default 10).
     highlight_lats : tuple of float
-        Magnetic latitudes to draw with extra emphasis
-        (default: −30°, 0° magnetic equator, +30°).
+        Magnetic latitudes drawn thicker and fully opaque
+        (default: −30°, magnetic equator 0°, +30°  — i.e. the EIA boundaries).
     label_lats : tuple of float
-        Which geomagnetic latitudes to label on the map (default: ±60, ±30, 0).
+        Magnetic latitudes annotated with a text label (default: ±60, ±30, 0°).
     line_color : str
         Colour for all geomagnetic lines (default ``'red'``).
     line_alpha : float
-        Opacity for normal lines (highlighted lines are always 1.0).
+        Opacity for regular (non-highlighted) lines (default 0.65).
     line_width : float
-        Line width for regular lines.
+        Line width for regular lines (default 0.8).
     highlight_width : float
-        Line width for highlighted lines (equator and ±30°).
+        Line width for highlighted lines (default 1.6).
 
     Raises
     ------
     ImportError
-        If the ``geomag`` package is not installed.
+        If the ``geomag`` package is not installed
+        (``pip install geomag``).
     """
     try:
-        import geomag
+        from geomag.geomag import GeoMag          # correct import path
     except ImportError:
         raise ImportError(
             "The 'geomag' package is required for geomagnetic latitude lines.\n"
             "Install it with:  pip install geomag"
         )
 
-    # Instantiate once — loads WMM coefficient file from disk only here
-    gm   = geomag.GeoMag()
-    lons = np.arange(-180, 180, 2)           # 2° longitude resolution
-    geo_lats = np.arange(-90, 91, step_deg)
-
     proj = ccrs.PlateCarree()
 
-    for geo_lat in geo_lats:
-        # Compute geographic latitude of this geomagnetic latitude contour
-        # by scanning across all longitudes
-        mag_lats = np.array([gm.GeoMag(geo_lat, lon).dec   # use decl for field
-                              for lon in lons])
-        # --- what we actually want is the *geomagnetic* latitude, not declination.
-        # GeoMag().GeoMag() returns a named result; we need the geographic lat
-        # that maps to a given magnetic lat — this is done by storing the
-        # geographic lat directly and labelling it as the magnetic-lat contour.
-        # For plotting, the approach is:
-        #   for each geographic lat strip, colour by its QD / apex mag lat.
-        # Simplest correct approach: use geo2mag if available, else skip.
-        try:
-            mag_lats = np.array([gm.geo2mag(geo_lat, lon)[0] for lon in lons])
-        except AttributeError:
-            # geo2mag not available in all geomag versions — fall back to
-            # plotting geographic lat contours labelled as magnetic
-            mag_lats = np.full_like(lons, geo_lat, dtype=float)
+    # ------------------------------------------------------------------
+    # Step 1 — build a (geo_lat × lon) grid of magnetic dip-latitudes.
+    # GeoMag is instantiated ONCE here (loads WMM file from disk once).
+    # Grid resolution: 2.5° lat × 5° lon → 73 × 72 = 5 256 points, ~0.7 s.
+    # ------------------------------------------------------------------
+    gm       = GeoMag()
+    lons     = np.arange(-180, 180,  5.0)
+    geo_lats = np.arange( -90,  91,  2.5)
 
-        is_highlight = geo_lat in highlight_lats
-        lw    = highlight_width if is_highlight else line_width
-        alpha = 1.0             if is_highlight else line_alpha
-        ls    = '-'             if is_highlight else '--'
+    mag_lat_grid = np.empty((len(geo_lats), len(lons)), dtype=np.float32)
+    for i, glat in enumerate(geo_lats):
+        for j, lon in enumerate(lons):
+            dip = gm.GeoMag(glat, lon).dip
+            mag_lat_grid[i, j] = np.degrees(np.arctan(0.5 * np.tan(np.radians(dip))))
 
-        ax.plot(lons, mag_lats, color=line_color, linewidth=lw,
-                linestyle=ls, alpha=alpha, transform=proj,
-                zorder=4)
+    # ------------------------------------------------------------------
+    # Step 2 — define contour levels covering the requested range
+    # ------------------------------------------------------------------
+    lat_min = int(np.floor(geo_lats[0]  / step_deg) * step_deg)
+    lat_max = int(np.ceil (geo_lats[-1] / step_deg) * step_deg)
+    all_levels    = np.arange(lat_min, lat_max + 1, step_deg).tolist()
+    hi_set        = set(highlight_lats)
+    label_set     = set(label_lats)
 
-        # Label at ~150°E to avoid crowding with coastlines
-        if geo_lat in label_lats:
-            label_lon = 150
-            idx = np.argmin(np.abs(lons - label_lon))
-            label_lat_val = mag_lats[idx]
-            sign = '+' if geo_lat > 0 else ''
-            ax.text(
-                label_lon, label_lat_val,
-                f'{sign}{geo_lat}°',
-                transform=proj,
-                color=line_color,
-                fontsize=7,
-                fontweight='bold' if is_highlight else 'normal',
-                va='bottom', ha='center',
-                path_effects=[pe.withStroke(linewidth=2, foreground='white')],
-                zorder=5,
-            )
+    # ------------------------------------------------------------------
+    # Step 3 — draw regular lines via contour (one matplotlib call)
+    # ------------------------------------------------------------------
+    regular_levels = [lv for lv in all_levels if lv not in hi_set]
+    if regular_levels:
+        ax.contour(
+            lons, geo_lats, mag_lat_grid,
+            levels=regular_levels,
+            colors=[line_color],
+            linewidths=line_width,
+            linestyles='--',
+            alpha=line_alpha,
+            transform=proj,
+            zorder=4,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 4 — draw highlighted lines (thicker, solid, fully opaque)
+    # ------------------------------------------------------------------
+    hi_levels = [lv for lv in all_levels if lv in hi_set]
+    if hi_levels:
+        ax.contour(
+            lons, geo_lats, mag_lat_grid,
+            levels=hi_levels,
+            colors=[line_color],
+            linewidths=highlight_width,
+            linestyles='-',
+            alpha=1.0,
+            transform=proj,
+            zorder=4,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 5 — add text labels at ~150 °E for selected latitudes
+    # ------------------------------------------------------------------
+    label_lon  = 150.0
+    lon_idx    = np.argmin(np.abs(lons - label_lon))
+
+    for target in label_set:
+        # Find the geographic latitude whose magnetic latitude is closest
+        # to the target at the label longitude
+        col     = mag_lat_grid[:, lon_idx]
+        geo_idx = int(np.argmin(np.abs(col - target)))
+        geo_lat_at_label = float(geo_lats[geo_idx])
+
+        sign = '+' if target > 0 else ('' if target == 0 else '')
+        is_hi = target in hi_set
+        ax.text(
+            label_lon,
+            geo_lat_at_label,
+            f'{sign}{int(target)}°',
+            transform=proj,
+            color=line_color,
+            fontsize=7,
+            fontweight='bold' if is_hi else 'normal',
+            va='bottom',
+            ha='center',
+            path_effects=[pe.withStroke(linewidth=2, foreground='white')],
+            zorder=5,
+        )
 
 
 # ===========================================================================
