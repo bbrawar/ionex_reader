@@ -86,7 +86,7 @@ setup(
     # --- runtime dependencies ---
     # Pin only a minimum version; let the user's environment resolve upper bounds.
     install_requires = [
-        'numpy>=1.21',
+        'numpy>=1.21,<2',
         'xarray>=0.19',
         'matplotlib>=3.4',
         'cartopy>=0.20',
