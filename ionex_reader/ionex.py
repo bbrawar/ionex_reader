@@ -126,7 +126,7 @@ def get_grid(header):
         n_hgt = max(1, round(abs(hgt2 - hgt1) / dhgt) + 1) if dhgt != 0 else 1
         heights = np.linspace(hgt1, hgt2, n_hgt)
     else:
-        heights = np.array([hgt])   # single shell from LON line
+        heights = np.array([hgt1])   # single shell from LON line
 
     # Build coordinate arrays — use round() to avoid floating-point drift
     # in np.arange, which can produce an extra spurious point.
