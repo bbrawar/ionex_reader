@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ionex_reader"
+dynamic = ["version", "description"]
+readme = "README.md"
+readme-content-type = "text/markdown"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Bhuvnesh Brawar", email = "bbrawar@gmail.com"}
+]
+keywords = [
+    "ionex",
+    "tec",
+    "ionosphere",
+    "gnss",
+    "gps",
+    "space-weather",
+    "xarray",
+    "cartopy",
+    "geophysics"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Scientific/Engineering :: Physics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy>=1.21,<2",
+    "xarray>=0.19",
+    "matplotlib>=3.4",
+    "cartopy>=0.20",
+]
+
+[project.optional-dependencies]
+geomag = ["geomag"]
+dev = [
+    "pytest>=7",
+    "pytest-cov",
+    "ruff>=0.1.0",
+    "build>=0.10",
+    "twine>=4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/bbrawar/ionex_reader"
+"Bug Tracker" = "https://github.com/bbrawar/ionex_reader/issues"
+Documentation = "https://github.com/bbrawar/ionex_reader/blob/main/README.md"
+Repository = "https://github.com/bbrawar/ionex_reader.git"
+
+[tool.setuptools]
+packages = ["ionex_reader"]
+
+[tool.setuptools.dynamic]
+version = {attr = "ionex_reader.ionex.__version__"}
+description = {file = ["README.md"], content-type = "text/markdown"}
